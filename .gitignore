@@ -38,6 +38,9 @@ coverage/
 *.temp
 .cache/
 
+# 本地模型文件（体积 100MB+，不要提交；用 download-model.bat 下载）
+models/
+
 # OS特定
 *.DS_Store
 ehthumbs.db

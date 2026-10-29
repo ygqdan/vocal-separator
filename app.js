@@ -126,6 +126,9 @@ const MODEL_CONFIGS = {
     'htdemucs': {
         name: 'HTDemucs 完整版',
         size: '316MB',
+        // 优先同目录下的本地文件（运行 download-model.bat 就会放到这里），
+        // 本地没有才走网络。企业代理/网络受限时，本地文件是唯一可靠的方式。
+        localFile: 'models/htdemucs.onnx',
         urls: [
             'https://hf-mirror.com/StemSplitio/htdemucs-onnx/resolve/main/htdemucs.onnx',
             'https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs.onnx'
@@ -140,6 +143,7 @@ const MODEL_CONFIGS = {
     'htdemucs-fp16': {
         name: 'HTDemucs 轻量版',
         size: '166MB',
+        localFile: 'models/htdemucs_fp16weights.onnx',
         // fp16 存储权重的版本：体积更小，但依赖 float16 算子支持，兼容性略差
         urls: [
             'https://hf-mirror.com/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx',
@@ -598,6 +602,22 @@ async function ensureModel() {
         }
 
         let modelData = state.localModelData;
+
+        // 1) 优先用同目录下的本地模型文件（download-model.bat 会放到 models/）
+        if (!modelData && config.localFile && location.protocol !== 'file:') {
+            try {
+                const localUrl = new URL(config.localFile, location.href).href;
+                const head = await fetch(localUrl, { method: 'HEAD' });
+                if (head.ok) {
+                    setProcessIndeterminate('读取模型', `正在读取本地模型 ${config.localFile}`);
+                    modelData = await fetchModelWithProgress(localUrl, updateModelProgress);
+                }
+            } catch (error) {
+                console.warn('本地模型不可用，改用网络下载:', error);
+            }
+        }
+
+        // 2) 本地没有，再从 CDN 拉取
         if (!modelData) {
             const errors = [];
             for (const url of config.urls) {
@@ -612,8 +632,8 @@ async function ensureModel() {
             }
             if (!modelData) {
                 throw new Error(
-                    '模型文件下载失败，可能被网络或镜像拦截。\n' +
-                    '可以把模型下载到本地后，用下面的「选择本地模型文件」加载。\n' +
+                    `模型文件下载失败：本地没有 ${config.localFile}，CDN 也被网络拦截了。\n` +
+                    `解决办法：在项目目录运行 download-model.bat 下载到本地（或用页面上的“选择本地模型文件”）。\n` +
                     errors.join('\n')
                 );
             }

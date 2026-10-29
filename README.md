@@ -67,10 +67,24 @@ php -S localhost:8000
 | 输出 | `stems` | `[1, 4, 2, 343980]` | 依次是 `[drums, bass, other, vocals]` |
 
 > ⚠️ **首次使用需下载模型文件**，建议在 WiFi 环境下使用。
-> 模型默认从 `hf-mirror.com`（国内可直连）下载，失败会回退 `huggingface.co`；
-> 两者都不通时，可以先把 `.onnx` 下载到本地，用页面上的“选择本地模型文件”加载。
-> 浏览器不会长期缓存这 100MB+ 的文件（`InferenceSession` 在内存里，刷新页面需要重新下载），
-> 如果反复使用，建议直接用本地模型文件。
+> 加载顺序：**本地 `models/` 目录 → `hf-mirror.com` → `huggingface.co`**。
+> 很多公司网络/浏览器代理会把 `hf-mirror.com` 跳转到的 `cas-bridge.xethub.hf.co` 拦掉
+> （浏览器里只报一句 `Failed to fetch`，但命令行 `curl` 却能下），所以最稳的做法是用脚本提前下好：
+
+```bat
+:: Windows：下载到 models\ （默认完整版 316MB，加 fp16 参数下载轻量版 166MB）
+download-model.bat
+download-model.bat fp16
+```
+
+```bash
+# macOS / Linux
+mkdir -p models
+curl -L -C - -o models/htdemucs.onnx \
+  https://hf-mirror.com/StemSplitio/htdemucs-onnx/resolve/main/htdemucs.onnx
+```
+
+> 放了本地文件后，页面会自动优先使用它（不再走网络），刷新即可生效。
 
 ## 🛠 技术栈
 
@@ -83,12 +97,14 @@ php -S localhost:8000
 
 ```
 vocal-separator/
-├── index.html      # 主页面
-├── styles.css      # 样式文件
-├── app.js          # 主逻辑
-├── start.bat       # Windows 本地启动脚本
-├── start.sh        # macOS / Linux 本地启动脚本
-└── README.md       # 说明文档
+├── index.html           # 主页面
+├── styles.css           # 样式文件
+├── app.js               # 主逻辑（改动后请同步改 index.html 里的 app.js?v=）
+├── start.bat            # Windows 本地启动脚本
+├── start.sh             # macOS / Linux 本地启动脚本
+├── download-model.bat   # Windows 模型下载脚本（下到 models\）
+├── models/              # 本地模型目录（已在 .gitignore 里，不提交）
+└── README.md            # 说明文档
 ```
 
 ## 🔧 核心原理
@@ -182,8 +198,23 @@ curl -L -o htdemucs_fp16weights.onnx \
   https://hf-mirror.com/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx
 ```
 
-如果仍然报 `Failed to fetch`，通常是：镜像被拦截、代理/广告插件拦截了 `hf-mirror.com`、
-或者浏览器不允许页面发起跨域请求。此时用本地模型文件最稳。
+如果仍然报 `Failed to fetch`，先分清是谁在拦：
+
+```bash
+# 命令行能下（200/206）但浏览器不能 —— 说明是浏览器代理/扩展在拦
+curl.exe -I -L --max-time 20 \
+  https://hf-mirror.com/StemSplitio/htdemucs-onnx/resolve/main/htdemucs.onnx
+```
+
+实测遇到过的情况：系统代理放行 `hf-mirror.com` 的 302，但把跳转目标
+`cas-bridge.xethub.hf.co` 拦掉，浏览器 fetch 直接就 `Failed to fetch`（818ms 失败），
+而 `curl` 走同一个代理却正常。这种“浏览器被拦、命令行能下”的场景，用
+`download-model.bat` 把文件放到 `models/` 是最省事的解法——页面会优先读本地文件，根本不发网络请求。
+
+### 页面还显示旧的行为 / 改了代码不生效
+
+本地用 `python -m http.server` 时浏览器可能缓存 `app.js`。`index.html` 里给脚本加了
+`?v=4` 版本号，**改动 app.js 后请把这个数字加 1**；或者直接按 `Ctrl+F5` 强制刷新。
 
 ### 加载模型时浏览器报 `Aborted()`
 
