@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>功能测试页面</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 1rem; }
+        .test { padding: 1rem; margin: 1rem 0; border-radius: 8px; background: #f5f5f5; }
+        .pass { border-left: 4px solid #059669; }
+        .fail { border-left: 4px solid #dc2626; }
+        button { padding: 0.5rem 1rem; margin: 0.5rem; cursor: pointer; }
+        pre { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 4px; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>🧪 功能测试页面</h1>
+
+    <div class="test" id="test-ort">
+        <h3>ONNX Runtime Web 加载测试</h3>
+        <button onclick="testORT()">测试加载 ONNX Runtime</button>
+        <pre id="ort-result"></pre>
+    </div>
+
+    <div class="test" id="test-audio">
+        <h3>Web Audio API 测试</h3>
+        <button onclick="testAudio()">测试 AudioContext</button>
+        <pre id="audio-result"></pre>
+    </div>
+
+    <div class="test" id="test-wasm">
+        <h3>WebAssembly 支持测试</h3>
+        <button onclick="testWasm()">测试 WASM 支持</button>
+        <pre id="wasm-result"></pre>
+    </div>
+
+    <div class="test" id="test-model">
+        <h3>模型加载测试 (MDX-Net 最小模型)</h3>
+        <button onclick="testModel()">测试加载模型</button>
+        <pre id="model-result"></pre>
+    </div>
+
+    <script type="module">
+        import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js';
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/';
+
+        function setResult(id, pass, message) {
+            const el = document.getElementById(id);
+            el.className = 'test ' + (pass ? 'pass' : 'fail');
+            el.querySelector('pre').textContent = message;
+        }
+
+        window.testORT = async () => {
+            try {
+                const start = performance.now();
+                // 尝试创建一个简单的会话来验证
+                const session = await ort.InferenceSession.create(
+                    'https://huggingface.co/onnx-community/mdx-net_onnx/resolve/main/model.onnx',
+                    { executionProviders: ['wasm'] }
+                );
+                const time = (performance.now() - start).toFixed(0);
+                setResult('test-ort', true, `✅ ONNX Runtime 加载成功 (${time}ms)\n版本: ${ort.version}\n设备: WASM`);
+            } catch (e) {
+                setResult('test-ort', false, `❌ 失败: ${e.message}\n\n可能原因:\n- 网络连接问题\n- 模型文件无法访问\n- 浏览器不支持 WASM`);
+            }
+        };
+
+        window.testAudio = () => {
+            try {
+                const ctx = new AudioContext({ sampleRate: 44100 });
+                setResult('test-audio', true, `✅ Web Audio API 支持正常\n采样率: ${ctx.sampleRate}Hz\n状态: ${ctx.state}\n最大声道数: ${ctx.destination.maxChannelCount}`);
+                ctx.close();
+            } catch (e) {
+                setResult('test-audio', false, `❌ 失败: ${e.message}`);
+            }
+        };
+
+        window.testWasm = () => {
+            try {
+                if (typeof WebAssembly === 'object') {
+                    // 简单的 WASM 模块测试
+                    const wasmCode = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+                    WebAssembly.validate(wasmCode);
+                    setResult('test-wasm', true, `✅ WebAssembly 支持正常\n内存: ${navigator.deviceMemory || '未知'} GB\n硬件并发: ${navigator.hardwareConcurrency || '未知'} 核心`);
+                } else {
+                    setResult('test-wasm', false, '❌ WebAssembly 不支持');
+                }
+            } catch (e) {
+                setResult('test-wasm', false, `❌ 失败: ${e.message}`);
+            }
+        };
+
+        window.testModel = async () => {
+            const resultEl = document.getElementById('model-result');
+            const testEl = document.getElementById('test-model');
+            try {
+                testEl.className = 'test';
+                resultEl.textContent = '正在下载模型... (约 45MB，请耐心等待)';
+
+                const start = performance.now();
+                const session = await ort.InferenceSession.create(
+                    'https://huggingface.co/onnx-community/mdx-net_onnx/resolve/main/model.onnx',
+                    { executionProviders: ['wasm'] }
+                );
+                const time = (performance.now() - start).toFixed(0);
+
+                // 测试推理
+                const input = new ort.Tensor('float32', new Float32Array(1 * 2 * 44100), [1, 2, 44100]);
+                const feeds = { input };
+                const results = await session.run(feeds);
+
+                setResult('test-model', true, `✅ 模型加载并推理成功!\n加载时间: ${time}ms\n输入形状: [1, 2, 44100]\n输出数量: ${Object.keys(results).length}\n输出键: ${Object.keys(results).join(', ')}`);
+            } catch (e) {
+                setResult('test-model', false, `❌ 失败: ${e.message}\n\n建议:\n1. 检查网络连接\n2. 尝试刷新页面重试\n3. 确保浏览器支持 WASM 和 SharedArrayBuffer`);
+            }
+        };
+
+        // 自动运行基础测试
+        window.testAudio();
+        window.testWasm();
+    </script>
+</body>
+</html>

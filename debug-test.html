@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>文件上传调试测试</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, sans-serif;
+            padding: 20px;
+            max-width: 500px;
+            margin: 0 auto;
+            background: #f5f5f5;
+        }
+        .test-box {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .btn {
+            display: inline-block;
+            padding: 15px 30px;
+            background: #2563eb;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            width: 100%;
+            text-align: center;
+        }
+        .btn:active { background: #1d4ed8; }
+        .file-input {
+            position: absolute;
+            width: 0.1px;
+            height: 0.1px;
+            opacity: 0;
+            overflow: hidden;
+            z-index: -1;
+        }
+        .log {
+            background: #1e1e1e;
+            color: #4ec9b0;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 13px;
+            max-height: 300px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+        .success { color: #4ec9b0; }
+        .error { color: #f14c4c; }
+        .info { color: #dcdcaa; }
+    </style>
+</head>
+<body>
+    <h1>🔧 文件上传调试测试</h1>
+
+    <div class="test-box">
+        <h3>测试 1: 直接点击隐藏 input (label 关联)</h3>
+        <input type="file" id="test1-input" class="file-input" accept="audio/*">
+        <label for="test1-input" class="btn">选择音频文件 (Label 方式)</label>
+        <div id="test1-result"></div>
+    </div>
+
+    <div class="test-box">
+        <h3>测试 2: JS 触发 click() - 同步调用</h3>
+        <input type="file" id="test2-input" class="file-input" accept="audio/*">
+        <button type="button" class="btn" id="test2-btn">选择音频文件 (JS click 同步)</button>
+        <div id="test2-result"></div>
+    </div>
+
+    <div class="test-box">
+        <h3>测试 3: JS 触发 click() - setTimeout 异步</h3>
+        <input type="file" id="test3-input" class="file-input" accept="audio/*">
+        <button type="button" class="btn" id="test3-btn">选择音频文件 (JS click 异步)</button>
+        <div id="test3-result"></div>
+    </div>
+
+    <div class="test-box">
+        <h3>测试 4: 触摸事件 touchend 触发</h3>
+        <input type="file" id="test4-input" class="file-input" accept="audio/*">
+        <button type="button" class="btn" id="test4-btn">选择音频文件 (Touchend)</button>
+        <div id="test4-result"></div>
+    </div>
+
+    <div class="test-box">
+        <h3>测试 5: 完整模拟 drop-zone 点击</h3>
+        <input type="file" id="test5-input" class="file-input" accept="audio/*">
+        <div id="test5-zone" style="
+            border: 2px dashed #2563eb;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            background: #f0f7ff;
+        ">
+            <p style="margin: 0; font-size: 18px; color: #2563eb;">点击或触摸此区域选择文件</p>
+            <p style="margin: 8px 0 0; font-size: 14px; color: #666;">(模拟原版 drop-zone)</p>
+        </div>
+        <div id="test5-result"></div>
+    </div>
+
+    <div class="test-box">
+        <h3>调试日志</h3>
+        <div class="log" id="debug-log"></div>
+    </div>
+
+    <script>
+        const log = document.getElementById('debug-log');
+        function addLog(msg, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            log.textContent += `[${time}] ${msg}\n`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        // 测试 1: Label 方式 (最可靠)
+        const test1Input = document.getElementById('test1-input');
+        test1Input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            addLog(`测试1成功: ${file?.name || '无文件'} (${file?.size || 0} bytes)`, 'success');
+            document.getElementById('test1-result').innerHTML =
+                `<span style="color:green">✅ 选中: ${file?.name || '取消'}</span>`;
+        });
+        addLog('测试1就绪: Label 关联方式 (原生支持，最兼容)');
+
+        // 测试 2: 同步 click()
+        const test2Btn = document.getElementById('test2-btn');
+        const test2Input = document.getElementById('test2-input');
+        test2Btn.addEventListener('click', (e) => {
+            addLog('测试2: 点击按钮，同步调用 input.click()');
+            test2Input.click();
+        });
+        test2Input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            addLog(`测试2结果: ${file?.name || '取消/无反应'}`, file ? 'success' : 'error');
+            document.getElementById('test2-result').innerHTML =
+                `<span style="color:${file?'green':'red'}">${file?'✅ 选中: '+file.name:'❌ 无反应或取消'}</span>`;
+        });
+        addLog('测试2就绪: 同步 click() - iOS Safari 需要此方式');
+
+        // 测试 3: 异步 click()
+        const test3Btn = document.getElementById('test3-btn');
+        const test3Input = document.getElementById('test3-input');
+        test3Btn.addEventListener('click', (e) => {
+            addLog('测试3: 点击按钮，setTimeout 异步调用 input.click()');
+            setTimeout(() => test3Input.click(), 0);
+        });
+        test3Input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            addLog(`测试3结果: ${file?.name || '取消/无反应'}`, file ? 'success' : 'error');
+            document.getElementById('test3-result').innerHTML =
+                `<span style="color:${file?'green':'red'}">${file?'✅ 选中: '+file.name:'❌ 无反应或取消'}</span>`;
+        });
+        addLog('测试3就绪: 异步 click() - 通常会被浏览器拦截');
+
+        // 测试 4: Touchend
+        const test4Btn = document.getElementById('test4-btn');
+        const test4Input = document.getElementById('test4-input');
+        const triggerTouch = (e) => {
+            e.preventDefault();
+            addLog('测试4: touchend 触发，同步调用 input.click()');
+            test4Input.click();
+        };
+        test4Btn.addEventListener('click', triggerTouch);
+        test4Btn.addEventListener('touchend', triggerTouch, { passive: false });
+        test4Input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            addLog(`测试4结果: ${file?.name || '取消/无反应'}`, file ? 'success' : 'error');
+            document.getElementById('test4-result').innerHTML =
+                `<span style="color:${file?'green':'red'}">${file?'✅ 选中: '+file.name:'❌ 无反应或取消'}</span>`;
+        });
+        addLog('测试4就绪: Touchend + preventDefault + 同步 click');
+
+        // 测试 5: 模拟 drop-zone
+        const test5Zone = document.getElementById('test5-zone');
+        const test5Input = document.getElementById('test5-input');
+        let touchMoved5 = false;
+        let touchStartY5 = 0;
+
+        test5Zone.addEventListener('touchstart', (e) => {
+            touchStartY5 = e.touches[0].clientY;
+            touchMoved5 = false;
+            addLog('测试5: touchstart');
+        }, { passive: true });
+
+        test5Zone.addEventListener('touchmove', (e) => {
+            if (Math.abs(e.touches[0].clientY - touchStartY5) > 10) {
+                touchMoved5 = true;
+            }
+        }, { passive: true });
+
+        test5Zone.addEventListener('touchend', (e) => {
+            if (touchMoved5) { addLog('测试5: 检测到滑动，忽略'); return; }
+            e.preventDefault();
+            addLog('测试5: touchend 触发文件选择');
+            test5Input.click();
+        }, { passive: false });
+
+        test5Zone.addEventListener('click', (e) => {
+            addLog('测试5: click 事件触发文件选择');
+            test5Input.click();
+        });
+
+        test5Input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            addLog(`测试5结果: ${file?.name || '取消/无反应'}`, file ? 'success' : 'error');
+            document.getElementById('test5-result').innerHTML =
+                `<span style="color:${file?'green':'red'}">${file?'✅ 选中: '+file.name:'❌ 无反应或取消'}</span>`;
+        });
+        addLog('测试5就绪: 完整模拟 drop-zone (touch + click)');
+
+        // 设备信息
+        addLog(`设备信息: ${navigator.userAgent}`, 'info');
+        addLog(`触摸支持: ${'ontouchstart' in window ? '是' : '否'}`, 'info');
+        addLog(`User Agent: ${navigator.userAgent}`, 'info');
+    </script>
+</body>
+</html>
