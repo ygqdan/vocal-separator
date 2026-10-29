@@ -328,6 +328,25 @@ section h2 {
     color: var(--color-primary);
 }
 
+/* 本地模型文件选择 */
+.local-model {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    flex-wrap: wrap;
+    margin-top: var(--space-md);
+    padding-top: var(--space-md);
+    border-top: 1px dashed var(--color-border);
+}
+
+.local-model .btn {
+    flex-shrink: 0;
+}
+
+.local-model .hint {
+    word-break: break-all;
+}
+
 /* 进度条 */
 .progress-bar {
     height: 8px;
@@ -343,6 +362,70 @@ section h2 {
     border-radius: var(--radius-full);
     transition: width var(--transition-normal);
     width: 0%;
+    position: relative;
+    overflow: hidden;
+}
+
+/* 转换进度条：更醒目 + 头部显示阶段和百分比 */
+.progress-bar-lg {
+    height: 14px;
+    margin-bottom: var(--space-md);
+}
+
+.progress-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-sm);
+}
+
+.progress-stage {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.progress-percent {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--color-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 正在进行中的斜纹动画，避免长时间停在同一百分比时看起来像卡死 */
+.progress-fill.is-busy::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: repeating-linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.28) 0 8px,
+        rgba(255, 255, 255, 0) 8px 16px
+    );
+    animation: progress-stripes 0.8s linear infinite;
+}
+
+@keyframes progress-stripes {
+    from { transform: translateX(0); }
+    to { transform: translateX(16px); }
+}
+
+/* 进度未知（例如正在准备模型）时的来回滑动效果 */
+.progress-bar.is-indeterminate .progress-fill {
+    width: 36% !important;
+    animation: progress-slide 1.3s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+    0% { margin-left: -36%; }
+    100% { margin-left: 100%; }
+}
+
+.progress-stats b {
+    color: var(--color-text-secondary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
 }
 
 .progress-text {
@@ -536,6 +619,18 @@ footer p:first-child {
     overflow: hidden;
     z-index: -1;
     pointer-events: none;
+}
+
+/* 启动失败提示（脚本没加载起来时才会出现） */
+.boot-error {
+    background: var(--color-error-light);
+    border: 1px solid var(--color-error);
+    color: var(--color-error);
+    border-radius: var(--radius-md);
+    padding: var(--space-md);
+    margin-bottom: var(--space-lg);
+    font-size: 0.9375rem;
+    line-height: 1.5;
 }
 
 /* 响应式 */

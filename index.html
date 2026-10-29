@@ -8,9 +8,10 @@
 </head>
 <body>
     <div class="container">
+        <div class="boot-error" id="bootError" role="alert" hidden></div>
         <header>
             <h1>🎵 音乐人声分离器</h1>
-            <p class="subtitle">基于浏览器端AI模型，将音乐分离为人声和伴奏</p>
+            <p class="subtitle">基于浏览器端AI模型，将音乐分离为人声、伴奏、鼓、贝斯等音轨</p>
         </header>
 
         <main>
@@ -49,33 +50,30 @@
                         <input type="radio" name="model" id="model-htdemucs" value="htdemucs" checked>
                         <label for="model-htdemucs">
                             <div class="model-info">
-                                <strong>HTDemucs (推荐)</strong>
-                                <span>高质量4源分离: 人声/鼓/贝斯/其他</span>
+                                <strong>HTDemucs 完整版 (推荐)</strong>
+                                <span>4 源分离：人声 / 鼓 / 贝斯 / 其他</span>
                             </div>
-                            <span class="model-size">~120MB</span>
+                            <span class="model-size">~316MB</span>
                         </label>
                     </div>
-                    <div class="model-card" data-model="mdx-net">
-                        <input type="radio" name="model" id="model-mdx" value="mdx-net">
-                        <label for="model-mdx">
+                    <div class="model-card" data-model="htdemucs-fp16">
+                        <input type="radio" name="model" id="model-htdemucs-fp16" value="htdemucs-fp16">
+                        <label for="model-htdemucs-fp16">
                             <div class="model-info">
-                                <strong>MDX-Net</strong>
-                                <span>轻量级2源分离: 人声/伴奏</span>
+                                <strong>HTDemucs 轻量版</strong>
+                                <span>fp16 权重，下载更小，兼容性略差</span>
                             </div>
-                            <span class="model-size">~45MB</span>
-                        </label>
-                    </div>
-                    <div class="model-card" data-model="umxl">
-                        <input type="radio" name="model" id="model-umxl" value="umxl">
-                        <label for="model-umxl">
-                            <div class="model-info">
-                                <strong>UMX-L (Open-Unmix)</strong>
-                                <span>经典开源模型，兼容性好</span>
-                            </div>
-                            <span class="model-size">~80MB</span>
+                            <span class="model-size">~166MB</span>
                         </label>
                     </div>
                 </div>
+
+                <div class="local-model">
+                    <label class="btn btn-secondary" for="localModelInput">选择本地模型文件 (.onnx)</label>
+                    <input type="file" id="localModelInput" accept=".onnx" class="file-input-hidden">
+                    <span class="hint" id="localModelName"></span>
+                </div>
+
                 <div class="model-progress" id="modelProgress" hidden>
                     <div class="progress-bar">
                         <div class="progress-fill" id="modelProgressFill"></div>
@@ -95,13 +93,17 @@
                     </span>
                 </button>
                 <div class="process-progress" id="processProgress" hidden>
-                    <div class="progress-bar">
+                    <div class="progress-head">
+                        <span class="progress-stage" id="processStage">准备中</span>
+                        <span class="progress-percent" id="processPercent">0%</span>
+                    </div>
+                    <div class="progress-bar progress-bar-lg" id="processBar">
                         <div class="progress-fill" id="processProgressFill"></div>
                     </div>
                     <p class="progress-text" id="processProgressText">准备中...</p>
                     <div class="progress-stats">
-                        <span id="processedTime">0:00</span>
-                        <span id="totalTime">0:00</span>
+                        <span>已用 <b id="processedTime">0:00</b></span>
+                        <span>剩余 <b id="totalTime">--:--</b></span>
                     </div>
                 </div>
             </section>
@@ -193,10 +195,40 @@
         </main>
 
         <footer>
-            <p>基于 <a href="https://github.com/facebookresearch/demucs" target="_blank">Demucs</a> / <a href="https://github.com/sigsep/open-unmix" target="_blank">Open-Unmix</a> 模型，使用 <a href="https://github.com/microsoft/onnxjs" target="_blank">ONNX.js</a> 在浏览器中运行</p>
-            <p>⚠️ 首次使用需下载模型文件（约45-120MB），建议在WiFi环境下使用</p>
+            <p>基于 <a href="https://github.com/facebookresearch/demucs" target="_blank">Demucs</a> / <a href="https://github.com/sigsep/open-unmix" target="_blank">Open-Unmix</a> 模型，使用 <a href="https://github.com/microsoft/onnxruntime" target="_blank">ONNX Runtime Web</a> 在浏览器中运行</p>
+            <p>⚠️ 首次使用需下载模型文件（约 166–316MB）；推理全部在本地进行，一首歌可能需要数分钟，建议在 WiFi + 桌面端使用</p>
         </footer>
     </div>
+
+    <!-- 兜底提示：如果 app.js 没能跑起来，至少让用户知道发生了什么，
+         而不是看起来“点了没反应”。必须在主脚本之前执行。 -->
+    <script>
+        window.__appReady = false;
+        window.showBootError = function (message) {
+            var el = document.getElementById('bootError');
+            if (!el) return;
+            el.textContent = message;
+            el.hidden = false;
+        };
+        window.clearBootError = function () {
+            var el = document.getElementById('bootError');
+            if (el) el.hidden = true;
+        };
+        window.addEventListener('error', function (event) {
+            var target = event.target;
+            if (target && target.tagName === 'SCRIPT') {
+                window.showBootError('脚本加载失败：' + (target.src || '') + '。请检查网络或广告拦截插件后刷新页面。');
+            }
+        }, true);
+        window.addEventListener('unhandledrejection', function (event) {
+            if (window.__appReady) return;
+            window.showBootError('页面脚本初始化失败：' + ((event.reason && event.reason.message) || event.reason || '未知错误'));
+        });
+        setTimeout(function () {
+            if (window.__appReady) return;
+            window.showBootError('页面脚本没有正常启动（可能是网络问题，或脚本被广告拦截插件拦下）。上传框仍可点开文件选择，但需要脚本才能继续处理。');
+        }, 5000);
+    </script>
 
     <script type="module" src="app.js"></script>
 </body>

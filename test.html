@@ -41,7 +41,9 @@
     </div>
 
     <script type="module">
-        import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js';
+        // 注意：必须是 dist/esm/ort.min.js（ES Module 构建）。
+        // dist/ort.min.js 是 UMD 构建，用 import 引入会拿到空命名空间，后续全部报错。
+        import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/esm/ort.min.js';
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/';
 
         function setResult(id, pass, message) {
