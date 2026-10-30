@@ -9,6 +9,7 @@
 - **拖拽上传** - 支持 MP3, WAV, FLAC, OGG, M4A 等常见音频格式
 - **实时进度显示** - 模型下载、音频处理进度可视化
 - **多轨道输出** - 人声、伴奏、鼓、贝斯、其他乐器分离下载
+- **旁白字幕（SRT）** - 本地服务模式下可用 Whisper 自动识别人声，生成带时间线的 SRT 字幕，听纯伴奏时可对照字幕时间
 - **响应式设计** - 适配桌面端和移动端
 - **深色模式支持** - 自动跟随系统主题
 
@@ -91,17 +92,36 @@ py -3.12 -m venv .venv
 
 没启动服务时，网页会自动退回浏览器端推理（较慢，且有上面的 wasm 限制）。
 
+### 3. 生成旁白字幕（可选）
+
+检测到本地服务后，「开始分离」按钮上方会出现 **「生成旁白字幕」** 勾选项。勾上后再分离，
+服务会用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 对**分离出的人声**做语音识别，
+生成带时间轴的 **SRT 字幕**；结果区会出现「下载 SRT」入口。把 SRT 与纯伴奏一起放进播放器，
+就能对照人声字幕的时间。
+
+- 字幕只对人声轨转录，纯音乐/无人声时会提示“未识别到语音内容”。
+- 首次使用会下载 Whisper 模型（默认 `small`，约 400MB），之后缓存复用。
+- 可用 `--asr-model` 调整模型大小（`tiny`/`base`/`small`/`medium`/`large-v3`），
+  `--asr-language zh` 可强制中文；唱歌场景识别精度天然有限，`small` 及以上效果更好。
+- 字幕失败不影响音轨结果，错误会显示在结果区。
+
+```bash
+python server.py --asr-model small --asr-language zh
+```
+
 ### 接口说明（如需自己写客户端）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET  | `/api/health` | 健康检查，返回 `{"status":"ok","model":...,"device":...}` |
-| POST | `/api/separate` | 表单字段 `file` 上传音频，立即返回 `{"job_id": "..."}`（后台异步处理） |
-| GET  | `/api/job/<id>` | 轮询状态：`status`(queued/processing/done/error)、`progress`、`message`、`stems`、`sample_rate` |
+| POST | `/api/separate` | 表单字段 `file` 上传音频；可选 `with_subtitles=1` 生成字幕。立即返回 `{"job_id": "..."}` |
+| GET  | `/api/job/<id>` | 轮询状态：`status`、`progress`、`message`、`stems`、`subtitles`、`subtitles_error`、`sample_rate` |
 | GET  | `/api/stem/<id>/<name>` | 下载单条音轨 WAV，`name` ∈ `vocals`/`drums`/`bass`/`other`/`accompaniment` |
+| GET  | `/api/subtitle/<id>` | 下载旁白字幕 SRT（仅在分离时传了 `with_subtitles=1` 且生成成功时可用） |
 
-> ⚠️ 首次运行 `python server.py` 会下载 Demucs 模型权重（约 300MB，走 Hugging Face / torch hub），
-> 之后会缓存，无需重复下载。服务默认只监听 `127.0.0.1`，仅供本机调用，不会暴露到外网。
+> ⚠️ 首次运行会下载 Demucs 模型权重（约 300MB，走 Hugging Face 镜像 / torch hub）；
+> 首次生成字幕还会下载 Whisper 模型（默认约 400MB）。之后都会缓存，无需重复下载。
+> 服务默认只监听 `127.0.0.1`，仅供本机调用，不会暴露到外网。
 
 ## 📦 模型说明
 

@@ -49,13 +49,18 @@ if errorlevel 1 (
 echo [2/2] 启动本地 Demucs 服务（默认 http://127.0.0.1:8001）...
 echo 保持此窗口打开；关闭窗口即停止服务。
 
-REM Demucs 模型要从 Hugging Face 下载，国内用镜像更稳（与网页端一致）
+REM Demucs / Whisper 模型要从 Hugging Face 下载，国内用镜像更稳（与网页端一致）
 if not defined HF_ENDPOINT set "HF_ENDPOINT=https://hf-mirror.com"
+REM hf-mirror 不支持 Xet 协议，禁用 Xet 回退普通下载（否则字幕模型会 401）
+if not defined HF_HUB_DISABLE_XET set "HF_HUB_DISABLE_XET=1"
+REM HF 缓存放到项目内，避免 ~/.cache 权限问题
+if not defined HF_HOME set "HF_HOME=%~dp0.cache\hf"
 
 REM torch.hub / demucs 默认缓存到 ~/.cache/torch，某些环境会“拒绝访问”，
 REM 改到项目内 .cache，自包含且保证可写。
 if not defined TORCH_HOME set "TORCH_HOME=%~dp0.cache"
 if not exist "%TORCH_HOME%" mkdir "%TORCH_HOME%" >nul 2>&1
+if not exist "%HF_HOME%" mkdir "%HF_HOME%" >nul 2>&1
 
 "%VPY%" server.py %*
 pause

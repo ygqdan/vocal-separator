@@ -84,6 +84,10 @@
             </section>
 
             <section class="process-section">
+                <label class="subtitle-option" id="subtitleOptionRow" hidden>
+                    <input type="checkbox" id="subtitleOption">
+                    <span>生成旁白字幕（Whisper 转录人声，较耗时；听纯伴奏时可对照字幕时间）</span>
+                </label>
                 <button class="btn btn-primary btn-lg" id="processBtn" disabled>
                     <span class="btn-text">开始分离</span>
                     <span class="btn-loading" hidden>
@@ -189,6 +193,12 @@
                     </div>
                 </div>
 
+                <div class="subtitle-result" id="subtitleResult" hidden>
+                    <span>旁白字幕（SRT，含人声时间线，可配合伴奏对照）</span>
+                    <a class="download-link" id="subtitleDownload" download="subtitles.srt">下载 SRT</a>
+                </div>
+                <p class="subtitle-error" id="subtitleError" hidden></p>
+
                 <div class="actions">
                     <button class="btn btn-secondary" id="processAnother">处理另一个文件</button>
                 </div>
@@ -232,6 +242,6 @@
     </script>
 
     <!-- ?v= 用于强制浏览器拿新版本；改动 app.js 后请同步改这个版本号，避免用户跑到缓存里的旧代码 -->
-    <script type="module" src="app.js?v=5"></script>
+    <script type="module" src="app.js?v=6"></script>
 </body>
 </html>

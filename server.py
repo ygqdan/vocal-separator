@@ -18,12 +18,25 @@ session.run() 必崩」这个浏览器硬限制：真正的推理放到本机 Py
 接口（详见 README「本地服务模式」）：
     GET  /api/health                       -> {"status","model","device"}
     POST /api/separate  (multipart: file) -> {"job_id": "..."}  （后台异步处理）
-    GET  /api/job/<id>                     -> {"status","progress","message","stems","sample_rate","error"}
+    GET  /api/job/<id>                     -> {"status","progress","message","stems","subtitles","sample_rate","error"}
     GET  /api/stem/<id>/<name>             -> WAV 文件（name ∈ vocals/drums/bass/other/accompaniment）
+    GET  /api/subtitle/<id>                -> 旁白字幕 SRT（分开时传 with_subtitles=1 才会生成）
 """
 
 import argparse
 import os
+
+# Hugging Face 相关默认值（可在启动前用环境变量覆盖）：
+# 1) 国内访问 huggingface.co 不稳，默认走镜像；
+# 2) hf-mirror 不支持 Xet 存储协议，必须禁用 Xet 回退普通下载，
+#    否则会报 “CAS Client Error: 401 Unauthorized … xethub.hf.co”。
+# 这两项必须在 huggingface_hub 被 import 之前设置（faster-whisper 是懒加载，满足）。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+# 3) 把 HF 缓存放到项目内 .cache/hf，避免某些环境 ~/.cache 无法写入。
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ.setdefault("HF_HOME", os.path.join(_PROJECT_DIR, ".cache", "hf"))
+
 import tempfile
 import threading
 import time
@@ -50,6 +63,12 @@ _jobs_lock = threading.Lock()
 _model = None
 _model_lock = threading.Lock()
 
+# Whisper（语音识别）模型单例，用于给人声生成带时间戳的旁白字幕（SRT）
+_asr_model = None
+_asr_lock = threading.Lock()
+ASR_MODEL_NAME = "small"   # tiny/base/small/medium/large-v3
+ASR_LANGUAGE = None        # None = 自动识别语言；"zh" 可强制中文
+
 # 临时目录里允许下载的音轨名
 ALLOWED_STEMS = ("vocals", "drums", "bass", "other", "accompaniment")
 
@@ -74,6 +93,86 @@ def get_model():
             m.to(DEVICE)
             _model = m
         return _model
+
+
+def get_asr_model():
+    """懒加载并缓存 faster-whisper 模型（线程安全）。
+
+    faster-whisper 用 CTranslate2 推理，CPU 也很流畅，且自带音频解码（PyAV），
+    不依赖系统 ffmpeg。首次会从 Hugging Face 下载模型权重。
+    """
+    global _asr_model
+    with _asr_lock:
+        if _asr_model is None:
+            from faster_whisper import WhisperModel  # 可能未安装
+
+            compute_type = "float16" if DEVICE == "cuda" else "int8"
+            _asr_model = WhisperModel(
+                ASR_MODEL_NAME,
+                device="cuda" if DEVICE == "cuda" else "cpu",
+                compute_type=compute_type,
+            )
+        return _asr_model
+
+
+def _srt_timestamp(seconds):
+    """把秒数格式化成 SRT 时间戳：HH:MM:SS,mmm"""
+    if seconds < 0:
+        seconds = 0
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3600 * 1000)
+    m, ms = divmod(ms, 60 * 1000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def load_audio_for_asr(path, target_sr=16000):
+    """读音频并转成 Whisper 需要的单声道 16kHz float32 numpy 数组。
+
+    直接传 numpy 给 faster-whisper，可绕开它对 PyAV（av.open）的解码依赖，
+    避免不同 PyAV 版本缺少 metadata_errors 参数导致的 TypeError。
+    """
+    import numpy as np
+    import soundfile as sf
+    import torch
+
+    data, sr = sf.read(path, always_2d=True)  # [frames, channels] float64
+    mono = torch.from_numpy(data).float().mean(dim=1)  # -> [frames] 单声道
+    if sr and sr != target_sr and mono.numel() > 0:
+        new_len = max(1, int(round(mono.numel() * target_sr / sr)))
+        mono = torch.nn.functional.interpolate(
+            mono.view(1, 1, -1), size=new_len, mode="linear", align_corners=False
+        ).view(-1)
+    return mono.numpy().astype(np.float32)
+
+
+def transcribe_to_srt(wav_path, out_srt_path):
+    """用 Whisper 转录音频，写成 SRT 字幕文件；返回字幕段数。"""
+    model = get_asr_model()
+    audio = load_audio_for_asr(wav_path)
+    segments, _info = model.transcribe(
+        audio,
+        language=ASR_LANGUAGE,
+        vad_filter=False,         # 不依赖 onnxruntime 的 VAD，交给 Whisper 自身切句
+        beam_size=5,
+    )
+
+    lines = []
+    index = 0
+    for seg in segments:
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        index += 1
+        lines.append(str(index))
+        lines.append(f"{_srt_timestamp(seg.start)} --> {_srt_timestamp(seg.end)}")
+        lines.append(text)
+        lines.append("")
+
+    # utf-8-sig（带 BOM）能让 Windows 播放器/剪辑软件更可靠地识别中文
+    with open(out_srt_path, "w", encoding="utf-8-sig") as fp:
+        fp.write("\n".join(lines))
+    return index
 
 
 def update_job(job_id, **kwargs):
@@ -148,8 +247,8 @@ def save_wav(path, tensor, samplerate):
         w.writeframes(interleaved)
 
 
-def process_job(job_id, input_path):
-    """后台线程：用 Demucs 分离音轨并写出 WAV。"""
+def process_job(job_id, input_path, with_subtitles=False):
+    """后台线程：用 Demucs 分离音轨并写出 WAV；可选用 Whisper 生成旁白字幕。"""
     try:
         update_job(job_id, status="processing", progress=10, message="正在加载模型...")
         model = get_model()
@@ -190,12 +289,38 @@ def process_job(job_id, input_path):
             save_wav(str(path), tensor.cpu(), model.samplerate)
             stem_urls[name] = f"/api/stem/{job_id}/{name}"
 
+        # 可选：对人声做语音识别，生成带时间线的旁白字幕（SRT）
+        subtitles_url = None
+        subtitles_error = None
+        if with_subtitles:
+            try:
+                update_job(
+                    job_id,
+                    progress=90,
+                    message="正在用 Whisper 生成旁白字幕（首次需下载识别模型，可能较慢）...",
+                )
+                srt_path = out_dir / "subtitles.srt"
+                count = transcribe_to_srt(str(out_dir / "vocals.wav"), str(srt_path))
+                if count > 0:
+                    subtitles_url = f"/api/subtitle/{job_id}"
+                else:
+                    subtitles_error = "Whisper 未识别到任何语音内容（可能是纯音乐/未检测到人声）"
+            except Exception as asr_exc:  # 字幕失败不应影响已完成的音轨
+                subtitles_error = str(asr_exc)
+                traceback.print_exc()
+
+        final_msg = "分离完成" if not subtitles_url else "分离完成，旁白字幕已生成"
+        if subtitles_error:
+            final_msg = "分离完成（字幕生成失败，详见 subtitles_error）"
+
         update_job(
             job_id,
             status="done",
             progress=100,
-            message="分离完成",
+            message=final_msg,
             stems=stem_urls,
+            subtitles=subtitles_url,
+            subtitles_error=subtitles_error,
             sample_rate=model.samplerate,
         )
     except Exception as exc:  # noqa: BLE001
@@ -231,6 +356,11 @@ def separate():
     if not f or not f.filename:
         return jsonify(error="缺少音频文件（表单字段应为 file）"), 400
 
+    # 是否生成旁白字幕：前端传 with_subtitles=1/true
+    with_subtitles = str(request.form.get("with_subtitles", "")).lower() in (
+        "1", "true", "yes", "on"
+    )
+
     cleanup_old_jobs()
 
     job_id = uuid.uuid4().hex
@@ -246,12 +376,18 @@ def separate():
             "progress": 0,
             "message": "已接收文件，排队中...",
             "stems": None,
+            "subtitles": None,
+            "subtitles_error": None,
             "sample_rate": None,
             "error": None,
             "created": time.time(),
         }
 
-    threading.Thread(target=process_job, args=(job_id, input_path), daemon=True).start()
+    threading.Thread(
+        target=process_job,
+        args=(job_id, input_path, with_subtitles),
+        daemon=True,
+    ).start()
     return jsonify(job_id=job_id)
 
 
@@ -266,8 +402,27 @@ def job_status(job_id):
         progress=j["progress"],
         message=j["message"],
         stems=j["stems"],
+        subtitles=j.get("subtitles"),
+        subtitles_error=j.get("subtitles_error"),
         sample_rate=j["sample_rate"],
         error=j["error"],
+    )
+
+
+@app.route("/api/subtitle/<job_id>")
+def subtitle_file(job_id):
+    with _jobs_lock:
+        j = jobs.get(job_id)
+    if j is None or not j.get("subtitles"):
+        return jsonify(error="该任务没有旁白字幕"), 404
+    path = os.path.join(j["dir"], "subtitles.srt")
+    if not os.path.exists(path):
+        return jsonify(error="字幕文件尚未生成"), 404
+    return send_file(
+        path,
+        mimetype="text/plain; charset=utf-8",
+        as_attachment=True,
+        download_name="subtitles.srt",
     )
 
 
@@ -286,7 +441,7 @@ def stem_file(job_id, name):
 
 
 def main():
-    global MODEL_NAME, DEVICE
+    global MODEL_NAME, DEVICE, ASR_MODEL_NAME, ASR_LANGUAGE
     parser = argparse.ArgumentParser(description="本地 Demucs 服务（供网页调用）")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")
     parser.add_argument("--port", type=int, default=8001, help="监听端口")
@@ -295,6 +450,16 @@ def main():
         "--device",
         default="cuda" if _torch_cuda_available() else "cpu",
         help="推理设备：cuda / cpu",
+    )
+    parser.add_argument(
+        "--asr-model",
+        default="small",
+        help="Whisper 模型大小：tiny/base/small/medium/large-v3（越大越准也越慢，默认 small）",
+    )
+    parser.add_argument(
+        "--asr-language",
+        default=None,
+        help="强制识别语言（如 zh）；不填则自动检测",
     )
     args = parser.parse_args()
 
@@ -318,9 +483,12 @@ def main():
 
     MODEL_NAME = args.model
     DEVICE = args.device
+    ASR_MODEL_NAME = args.asr_model
+    ASR_LANGUAGE = args.asr_language or None
 
     print(f"[vocal-separator] 本地 Demucs 服务启动：http://{args.host}:{args.port}")
     print(f"[vocal-separator] 模型={MODEL_NAME}  设备={DEVICE}")
+    print(f"[vocal-separator] 旁白字幕 Whisper={ASR_MODEL_NAME}  语言={ASR_LANGUAGE or 'auto'}")
     print("[vocal-separator] 在网页里点击「开始分离」即可自动调用本服务。")
     app.run(host=args.host, port=args.port, threaded=True)
 

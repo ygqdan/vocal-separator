@@ -225,7 +225,10 @@ const state = {
     results: {},
     useLocalService: false, // 是否检测到本地 Demucs 服务（本地加速模式）
     localServiceBase: '',   // 服务基地址，如 http://127.0.0.1:8001
-    localServiceModel: ''   // 服务实际使用的模型名
+    localServiceModel: '',  // 服务实际使用的模型名
+    withSubtitles: false,   // 是否要求本地服务用 Whisper 生成旁白字幕（SRT）
+    lastSubtitlesUrl: '',   // 最近一次分离生成的字幕下载地址（相对路径）
+    lastSubtitlesError: ''  // 最近一次字幕生成失败的原因
 };
 
 // DOM 元素
@@ -273,6 +276,13 @@ function initElements() {
     elements.bassCard = document.getElementById('bassCard');
     elements.otherCard = document.getElementById('otherCard');
     elements.processAnother = document.getElementById('processAnother');
+
+    // 旁白字幕（Whisper）相关
+    elements.subtitleOptionRow = document.getElementById('subtitleOptionRow');
+    elements.subtitleOption = document.getElementById('subtitleOption');
+    elements.subtitleResult = document.getElementById('subtitleResult');
+    elements.subtitleDownload = document.getElementById('subtitleDownload');
+    elements.subtitleError = document.getElementById('subtitleError');
 
     // 模型选择单选按钮
     elements.modelRadios = document.querySelectorAll('input[name="model"]');
@@ -821,6 +831,8 @@ async function checkLocalService() {
             state.localServiceBase = base;
             state.localServiceModel = (data && data.model) || 'htdemucs';
             showLocalServiceBanner(data);
+            // 只有本地模式才具备 Whisper 字幕能力，检测到服务后再显示勾选项
+            if (elements.subtitleOptionRow) elements.subtitleOptionRow.hidden = false;
             logger.info('检测到本地 Demucs 服务:', base, data);
             return;
         } catch (e) {
@@ -849,6 +861,7 @@ async function separateViaServer(file) {
     showProcessProgress('上传中', '正在上传音频到本地服务...');
     const form = new FormData();
     form.append('file', file);
+    if (state.withSubtitles) form.append('with_subtitles', '1');
     let jobId;
     try {
         const res = await fetch(`${base}/api/separate`, { method: 'POST', body: form });
@@ -866,11 +879,13 @@ async function separateViaServer(file) {
     // 2) 轮询任务状态
     let status = 'queued';
     let lastMsg = '';
+    let lastJob = null;
     while (status !== 'done' && status !== 'error') {
         await new Promise((r) => setTimeout(r, 1000));
         const res = await fetch(`${base}/api/job/${jobId}`, { cache: 'no-store' });
         if (!res.ok) throw new Error(`查询任务状态失败 HTTP ${res.status}`);
         const job = await res.json();
+        lastJob = job;
         status = job.status;
         lastMsg = job.message || '';
         if (typeof job.progress === 'number') {
@@ -882,6 +897,10 @@ async function separateViaServer(file) {
             throw new Error('本地服务处理失败：' + (job.error || job.message || '未知错误'));
         }
     }
+
+    // 记录本次字幕结果，供 displayResults 后渲染下载入口
+    state.lastSubtitlesUrl = (lastJob && lastJob.subtitles) || '';
+    state.lastSubtitlesError = (lastJob && lastJob.subtitles_error) || '';
 
     // 3) 逐轨下载并解码为 AudioBuffer（供 displayResults 播放/导出复用既有链路）
     updateProcessProgress(95, '下载结果', '正在下载分离结果...');
@@ -896,6 +915,32 @@ async function separateViaServer(file) {
         results[name] = await ctx.decodeAudioData(buf);
     }
     return results;
+}
+
+// 根据本次分离结果，显示/隐藏「旁白字幕 SRT」下载入口
+function renderSubtitleResult() {
+    const box = elements.subtitleResult;
+    const errEl = elements.subtitleError;
+    const link = elements.subtitleDownload;
+    if (!box) return;
+
+    if (state.lastSubtitlesUrl) {
+        if (link) {
+            link.href = state.localServiceBase + state.lastSubtitlesUrl;
+            link.setAttribute('download', 'subtitles.srt');
+        }
+        box.hidden = false;
+        if (errEl) errEl.hidden = true;
+    } else if (state.lastSubtitlesError) {
+        box.hidden = true;
+        if (errEl) {
+            errEl.hidden = false;
+            errEl.textContent = '旁白字幕生成失败：' + state.lastSubtitlesError;
+        }
+    } else {
+        box.hidden = true;
+        if (errEl) errEl.hidden = true;
+    }
 }
 
 // 把分离过程中的异常翻译成用户能看懂的提示，并刷新进度条/Toast
@@ -949,11 +994,14 @@ async function processAudio() {
         elements.processBtn.querySelector('.btn-loading').hidden = false;
         showProcessProgress('准备转换', '已连接本地 Demucs 服务，准备上传...');
         hideResults();
+        state.lastSubtitlesUrl = '';
+        state.lastSubtitlesError = '';
 
         try {
             logger.info('开始分离音频（本地服务）:', state.audioFile && state.audioFile.name);
             const results = await separateViaServer(state.audioFile);
             displayResults(results);
+            renderSubtitleResult();
             finishProcessProgress('已生成人声、伴奏、鼓、贝斯、其他');
             logger.info('分离完成，已生成音轨:', Object.keys(results).join(', '));
             await new Promise((resolve) => setTimeout(resolve, 700));
@@ -1296,6 +1344,9 @@ function hideResults() {
         }
         audio.src = '';
     });
+    // 收起旁白字幕入口
+    if (elements.subtitleResult) elements.subtitleResult.hidden = true;
+    if (elements.subtitleError) elements.subtitleError.hidden = true;
 }
 
 // 处理另一个文件
@@ -1313,6 +1364,13 @@ async function init() {
 
     elements.processBtn.addEventListener('click', processAudio);
     elements.processAnother.addEventListener('click', processAnother);
+
+    // 「生成旁白字幕」勾选（仅本地模式可用，检测到服务后才显示）
+    if (elements.subtitleOption) {
+        elements.subtitleOption.addEventListener('change', (e) => {
+            state.withSubtitles = e.target.checked;
+        });
+    }
 
     // 不再在页面打开时自动下载 100MB+ 的模型：
     // 既拖慢首屏，也会让用户以为“页面卡住了”。模型改为点击“开始分离”时懒加载。
