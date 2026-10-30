@@ -9,6 +9,7 @@
 <body>
     <div class="container">
         <div class="boot-error" id="bootError" role="alert" hidden></div>
+        <div class="local-service-banner" id="localServiceBanner" hidden></div>
         <header>
             <h1>🎵 音乐人声分离器</h1>
             <p class="subtitle">基于浏览器端AI模型，将音乐分离为人声、伴奏、鼓、贝斯等音轨</p>
@@ -196,7 +197,7 @@
 
         <footer>
             <p>基于 <a href="https://github.com/facebookresearch/demucs" target="_blank">Demucs</a> / <a href="https://github.com/sigsep/open-unmix" target="_blank">Open-Unmix</a> 模型，使用 <a href="https://github.com/microsoft/onnxruntime" target="_blank">ONNX Runtime Web</a> 在浏览器中运行</p>
-            <p>⚠️ 首次使用需下载模型文件（约 166–316MB）；推理全部在本地进行，一首歌可能需要数分钟，建议在 WiFi + 桌面端使用</p>
+            <p>⚠️ 浏览器端推理较慢且有内存限制；<b>推荐运行本机 Demucs 服务（见 README「本地服务模式」）</b>，网页会自动切到本地加速模式，无需在浏览器里下载/运行模型</p>
         </footer>
     </div>
 
@@ -231,6 +232,6 @@
     </script>
 
     <!-- ?v= 用于强制浏览器拿新版本；改动 app.js 后请同步改这个版本号，避免用户跑到缓存里的旧代码 -->
-    <script type="module" src="app.js?v=4"></script>
+    <script type="module" src="app.js?v=5"></script>
 </body>
 </html>

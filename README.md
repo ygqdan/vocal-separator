@@ -51,6 +51,58 @@ php -S localhost:8000
 
 `start.bat` 支持指定端口：`start.bat 8080`；设置 `NO_OPEN=1` 可禁止自动打开浏览器。
 
+## 🖥️ 本地服务模式（推荐，可绕过浏览器限制）
+
+浏览器端用 ONNX Runtime Web 跑 htdemucs（300MB、约 2.5 万节点）有个**绕不开的硬限制**：
+会话能建起来，但真正 `session.run()` 执行时 wasm 后端会直接 abort（表现为一串裸数字报错）。
+详见文末「常见问题」最后一条。
+
+**最稳的解法**是把真正的推理放到本机 Python 里跑，浏览器只负责上传文件、轮询进度、播放/下载结果。
+本项目已内置一个本地 Demucs 服务（`server.py`），网页启动时会**自动探测**，连上就切到本地模式，无需任何配置。
+
+### 1. 启动本地服务
+
+> ⚠️ **Python 版本要求：3.11 ~ 3.13**。torch 尚不支持 Python 3.14+，用它装出来的 torch 导入会失败
+> （表现为 `ImportError: 'torch' can only be initialized once per process...`，这是二次导入的误导性报错，
+> 真实原因是首次 `import torch` 就失败了）。`start-server.bat` 会自动挑选 3.11/3.12/3.13 并创建 `.venv`。
+
+```bash
+# Windows（首次会自动建 .venv 并 pip 安装依赖，可能耗时几分钟）
+start-server.bat
+
+# macOS / Linux
+./start-server.sh
+
+# 或手动（推荐 3.12）
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python server.py   # 默认 http://127.0.0.1:8001
+# 有 NVIDIA 显卡时走 GPU 加速
+.venv\Scripts\python server.py --device cuda
+```
+
+保持这个窗口/终端打开，服务就在跑。
+
+### 2. 打开网页
+
+正常打开 `index.html`（或本地静态服务器）。页面右上角/顶部会出现绿色横幅
+**「已检测到本地 Demucs 服务（CPU/GPU 加速），将自动走本地模式」**，
+此时点击「开始分离」就会把文件发给本机服务处理，**不再需要在浏览器里下载/运行模型**。
+
+没启动服务时，网页会自动退回浏览器端推理（较慢，且有上面的 wasm 限制）。
+
+### 接口说明（如需自己写客户端）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET  | `/api/health` | 健康检查，返回 `{"status":"ok","model":...,"device":...}` |
+| POST | `/api/separate` | 表单字段 `file` 上传音频，立即返回 `{"job_id": "..."}`（后台异步处理） |
+| GET  | `/api/job/<id>` | 轮询状态：`status`(queued/processing/done/error)、`progress`、`message`、`stems`、`sample_rate` |
+| GET  | `/api/stem/<id>/<name>` | 下载单条音轨 WAV，`name` ∈ `vocals`/`drums`/`bass`/`other`/`accompaniment` |
+
+> ⚠️ 首次运行 `python server.py` 会下载 Demucs 模型权重（约 300MB，走 Hugging Face / torch hub），
+> 之后会缓存，无需重复下载。服务默认只监听 `127.0.0.1`，仅供本机调用，不会暴露到外网。
+
 ## 📦 模型说明
 
 | 模型 | 文件大小 | 分离轨道 | 说明 |
@@ -218,14 +270,32 @@ curl.exe -I -L --max-time 20 \
 
 ### 加载模型时浏览器报 `Aborted()`
 
-这基本是 **WASM 内存不够**：htdemucs 的推理会话本身要占用约 1GB 内存，加上 300MB 模型文件，
-峰值需求在 1.5GB 以上。内存吃紧时会直接 abort，而不是给出友好提示。
+这是 **图优化阶段内存不够**：htdemucs 有约 2.5 万个节点，开启图优化（`basic` / `all`）时
+ONNX Runtime 会额外分配大量临时结构，在浏览器 wasm 里直接 abort。
 
-处理办法：关闭其他标签页和占内存的程序后重试；或者换台内存更宽裕的机器。
-页面本身也会提示“浏览器内存不足”，但浏览器抛出的 `Aborted()` 无法拿到更多细节。
+现在代码里把 `graphOptimizationLevel` 设成了 `'disabled'`，实测可以稳定建会话（13–45 秒），
+代价是推理会慢一些。如果仍然 abort，说明机器内存确实紧张，关掉其他程序再试。
+
+### 点击“开始分离”后提示“模型推理失败（ONNX Runtime Web 内部错误 4xxxxxxxx）”
+
+这是浏览器端 ONNX Runtime Web 的**已知硬限制**，暂时无法在浏览器里绕过：
+
+- 模型文件、会话创建、输入输出名字（`mix` → `stems`）都验证通过，说明模型本身没问题；
+- 但真正执行 `session.run()` 时，ONNX Runtime Web 的 wasm 后端会抛一个裸的数字（状态指针），
+  拿不到任何错误信息；
+- 已排除内存因素（空闲 4.7GB、Edge 只占 1.4GB 时同样失败），也排除了 wasm 内存上限和单线程问题
+  （开了 COOP/COEP 用 4 线程、换 ORT 1.20.1 都是一样的结果）。
+
+**推荐解法：用本地 Demucs 服务（桌面加速）。** 仓库已内置 `server.py`，按上方
+「🖥️ 本地服务模式」启动后，网页会自动切到本地模式，把分离交给本机 Python（CPU/GPU）跑，
+既不受这个 wasm 限制、又能用完整版 Demucs、还能用 GPU，速度也快得多。
+
+如果你只用纯前端、不想起服务，那只能换更小的浏览器可用模型（例如按频段拆分的轻量 ONNX、
+或专门的浏览器端人声分离模型），换模型时改 `MODEL_CONFIGS` 和 `separateAudio()` 的输入输出映射即可。
+仓库里保留了完整的下载、加载、分段、OLA、导出链路。
 
 ### 分离很慢 / 风扇狂转
 
-浏览器里是 WASM **单线程**推理，htdemucs 在 CPU 上大约每 7.8 秒片段需要几十秒。
+浏览器里是 WASM 推理，htdemucs 在 CPU 上大约每 7.8 秒片段需要几十秒。
 一首 3 分钟的歌需要切 ~24 段，所以整体可能要十几分钟，这是当前方案的物理限制，不是卡死。
 建议先用 20–30 秒的片段验证效果；正式处理请用桌面版 Demucs 或带 GPU 的服务端。

@@ -1,0 +1,13 @@
+# Local Demucs service dependencies
+# Install: pip install -r requirements.txt
+#
+# Python version: 3.11 ~ 3.13 only. torch does NOT support 3.14+ yet.
+# Prefer the project venv created by start-server.bat:
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt
+flask>=2.3
+flask-cors>=3.0
+demucs>=4.0
+# Note: demucs pulls in torch / torchaudio automatically.
+# For GPU acceleration, install a CUDA build of torch matching your GPU
+# from https://pytorch.org (do NOT rely on the default CPU wheel).

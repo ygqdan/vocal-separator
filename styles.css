@@ -633,6 +633,26 @@ footer p:first-child {
     line-height: 1.5;
 }
 
+/* 检测到本地 Demucs 服务时的提示横幅 */
+.local-service-banner {
+    background: var(--color-success-light, #ecfdf5);
+    border: 1px solid var(--color-success, #059669);
+    color: #065f46;
+    border-radius: var(--radius-md);
+    padding: var(--space-md);
+    margin-bottom: var(--space-lg);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+}
+.local-service-banner .hint {
+    opacity: 0.8;
+    font-size: 0.8125rem;
+}
+.local-service-banner a {
+    color: inherit;
+    text-decoration: underline;
+}
+
 /* 响应式 */
 @media (max-width: 600px) {
     .container {

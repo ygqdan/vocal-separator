@@ -23,9 +23,56 @@ const ORT_CDN_BASES = [
     `https://registry.npmmirror.com/onnxruntime-web/${ORT_VERSION}/files/dist/`
 ];
 
+// 本地 Demucs 服务（桌面加速模式）：页面启动后依次探测这些地址，
+// 只要有一个返回 /api/health，就切到「本地模式」——把耗时的分离交给本机 Python 跑，
+// 浏览器只负责上传、轮询进度、下载并播放/保存结果。这样就绕开了
+// wasm 后端跑不动 300MB 模型那个浏览器硬限制。
+const LOCAL_SERVICE_URLS = [
+    'http://127.0.0.1:8001',
+    'http://localhost:8001'
+];
+
 let ortPromise = null;
 // 加载成功后的 ONNX Runtime 命名空间（供 separateAudio 里 new ort.Tensor 使用）
 let ort = null;
+
+// ---------- 控制台日志（统一把项目运行与报错情况写入浏览器控制台）----------
+// 用法：logger.info('xxx') / logger.warn(...) / logger.error(err) / logger.debug(...)
+const LOG_PREFIX = '🎤 vocal-sep';
+
+function log(level, ...args) {
+    const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const tag = `[${LOG_PREFIX} ${ts}]`;
+    switch (level) {
+        case 'error': console.error(tag, ...args); break;
+        case 'warn':  console.warn(tag, ...args); break;
+        case 'info':  console.info(tag, ...args); break;
+        case 'debug': console.debug(tag, ...args); break;
+        default:      console.log(tag, ...args);
+    }
+}
+const logger = {
+    info:  (...a) => log('info', ...a),
+    warn:  (...a) => log('warn', ...a),
+    error: (...a) => log('error', ...a),
+    debug: (...a) => log('debug', ...a),
+};
+
+// 统一打印错误：尽量把 Error 对象的 message 与堆栈都带出来，方便排查
+function logError(context, err) {
+    const raw = err && err.stack ? err : (err && err.message ? err : String(err));
+    logger.error(`[${context}]`, raw);
+}
+
+// 兜底：任何未被 try/catch 捕获的同步错误 / Promise 拒绝，都写入控制台
+window.addEventListener('error', (event) => {
+    logger.error('[未捕获异常]', event.message, event.filename ? `(${event.filename}:${event.lineno}:${event.colno})` : '');
+});
+window.addEventListener('unhandledrejection', (event) => {
+    if (window.__appReady) {
+        logger.error('[未处理的 Promise 拒绝]', (event.reason && (event.reason.stack || event.reason.message)) || event.reason);
+    }
+});
 
 // 动态 import 可能长时间挂起，加超时避免一直卡住
 function importWithTimeout(url, timeout = ORT_LOAD_TIMEOUT) {
@@ -75,6 +122,7 @@ async function loadOrt() {
 
             for (const base of ORT_CDN_BASES) {
                 // 优先 ESM 构建（dist/esm/ort.min.js 才是真正的 ES Module）
+                logger.info('尝试加载 ONNX Runtime（ESM）:', base);
                 try {
                     const mod = await importWithTimeout(`${base}esm/ort.min.js`);
                     // 该构建同时有 default 和具名导出，择优取可用的那个
@@ -84,12 +132,15 @@ async function loadOrt() {
                     }
                     runtime.env.wasm.wasmPaths = base;
                     ort = runtime;
+                    logger.info('ONNX Runtime 加载成功（ESM）:', base);
                     return runtime;
                 } catch (error) {
                     errors.push(`ESM ${base} → ${error.message}`);
+                    logger.warn('ONNX Runtime ESM 加载失败，回退 UMD:', base, error.message);
                 }
 
                 // 回退 UMD 构建
+                logger.info('尝试加载 ONNX Runtime（UMD）:', base);
                 try {
                     delete window.ort;
                     await loadScriptOnce(`${base}ort.min.js`);
@@ -99,13 +150,15 @@ async function loadOrt() {
                     }
                     runtime.env.wasm.wasmPaths = base;
                     ort = runtime;
+                    logger.info('ONNX Runtime 加载成功（UMD）:', base);
                     return runtime;
                 } catch (error) {
                     errors.push(`UMD ${base} → ${error.message}`);
+                    logger.warn('ONNX Runtime UMD 加载失败:', base, error.message);
                 }
             }
 
-            console.error('ONNX Runtime 所有 CDN 均加载失败:\n' + errors.join('\n'));
+            logger.error('ONNX Runtime 所有 CDN 均加载失败:\n' + errors.join('\n'));
             throw new Error('无法加载 ONNX Runtime（所有 CDN 均不可用），请检查网络或关闭广告拦截插件');
         })();
 
@@ -169,7 +222,10 @@ const state = {
     localModelData: null,   // 用户手动选择的本地 .onnx 文件
     modelLoaded: false,
     isProcessing: false,
-    results: {}
+    results: {},
+    useLocalService: false, // 是否检测到本地 Demucs 服务（本地加速模式）
+    localServiceBase: '',   // 服务基地址，如 http://127.0.0.1:8001
+    localServiceModel: ''   // 服务实际使用的模型名
 };
 
 // DOM 元素
@@ -375,13 +431,16 @@ function isAudioFile(file) {
 }
 
 function handleFile(file) {
+    logger.info('选择文件:', file.name, `(${formatFileSize(file.size)})`);
     if (!isAudioFile(file)) {
+        logger.warn('文件被拒绝：不是受支持的音频格式:', file.name, file.type);
         showToast('请选择音频文件', 'error');
         return;
     }
 
     // 检查文件大小 (限制 100MB)
     if (file.size > 100 * 1024 * 1024) {
+        logger.warn('文件被拒绝：超过 100MB 限制:', file.name, formatFileSize(file.size));
         showToast('文件过大，请选择小于 100MB 的文件', 'error');
         return;
     }
@@ -432,6 +491,7 @@ function getAudioContext() {
 // 于是“选完文件”后既不报错也没有任何反馈。这里直接解码，失败时给出明确提示。
 async function loadAudioFile(file) {
     try {
+        logger.info('开始解码音频:', file.name);
         const arrayBuffer = await file.arrayBuffer();
         const audioContext = getAudioContext();
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -440,9 +500,10 @@ async function loadAudioFile(file) {
 
         const channelText = audioBuffer.numberOfChannels === 1 ? '单声道' : `${audioBuffer.numberOfChannels} 声道`;
         elements.fileSize.textContent = `${formatFileSize(file.size)} · ${channelText} · ${formatTime(audioBuffer.duration)}`;
+        logger.info('音频解码成功:', file.name, channelText, `时长 ${formatTime(audioBuffer.duration)}`);
         showToast('音频加载完成，可以开始分离', 'success');
     } catch (error) {
-        console.error('音频解码失败:', error);
+        logError('音频解码失败', error);
         state.audioBuffer = null;
         elements.processBtn.disabled = true;
         showToast('音频解码失败，请换一个文件试试（建议 MP3 / WAV）', 'error');
@@ -482,9 +543,10 @@ function setupModelSelection() {
                     elements.localModelName.textContent =
                         `已选择本地模型：${file.name}（${formatFileSize(file.size)}）`;
                 }
+                logger.info('本地模型文件已载入内存:', file.name, formatFileSize(file.size));
                 showToast('本地模型已就绪，点击“开始分离”使用', 'success');
             } catch (error) {
-                console.error('读取本地模型失败:', error);
+                logError('读取本地模型失败', error);
                 state.localModelData = null;
                 if (elements.localModelName) elements.localModelName.textContent = '';
                 showToast('读取本地模型失败：' + error.message, 'error');
@@ -589,6 +651,7 @@ async function ensureModel() {
 
     startModelProgress(config);
     setProcessIndeterminate('准备引擎', '正在加载 ONNX Runtime 推理引擎（首次约 10MB，之后走缓存）...');
+    logger.info('开始准备模型:', config.name);
 
     try {
         const runtime = await loadOrt();
@@ -610,10 +673,13 @@ async function ensureModel() {
                 const head = await fetch(localUrl, { method: 'HEAD' });
                 if (head.ok) {
                     setProcessIndeterminate('读取模型', `正在读取本地模型 ${config.localFile}`);
+                    logger.info('发现本地模型文件，开始读取:', config.localFile);
                     modelData = await fetchModelWithProgress(localUrl, updateModelProgress);
+                } else {
+                    logger.info('本地模型文件不存在，改用网络下载:', config.localFile, `(HTTP ${head.status})`);
                 }
             } catch (error) {
-                console.warn('本地模型不可用，改用网络下载:', error);
+                logger.warn('本地模型不可用，改用网络下载:', error);
             }
         }
 
@@ -623,10 +689,12 @@ async function ensureModel() {
             for (const url of config.urls) {
                 try {
                     elements.modelProgressText.textContent = `正在连接模型服务器...`;
+                    logger.info('开始下载模型:', url);
                     modelData = await fetchModelWithProgress(url, updateModelProgress);
+                    logger.info('模型下载完成:', url, formatFileSize(modelData.byteLength));
                     break;
                 } catch (error) {
-                    console.warn('模型下载失败:', url, error);
+                    logger.warn('模型下载失败:', url, error.message);
                     errors.push(`${url} → ${error.message}`);
                 }
             }
@@ -640,11 +708,12 @@ async function ensureModel() {
         }
 
         elements.modelProgressText.textContent = '正在初始化推理会话（首次较慢，请耐心等待）...';
+        logger.info('正在创建 ONNX InferenceSession（关闭图优化）...');
         state.session = await runtime.InferenceSession.create(modelData, {
             executionProviders: ['wasm'],
-            // 用 basic 就够了：htdemucs 有 ~2.5 万个节点，extended/all 级别的图优化
-            // 在浏览器里既慢又吃内存，收益很小
-            graphOptimizationLevel: 'basic'
+            // 这个模型有 ~2.5 万个节点，开着图优化时（basic/all）在浏览器里会直接
+            // 分配失败并 abort；关掉优化后可以稳定建会话（实测 13–45 秒）。
+            graphOptimizationLevel: 'disabled'
         });
 
         // 释放 300MB 的模型字节，避免和 wasm 内存叠加
@@ -661,10 +730,11 @@ async function ensureModel() {
 
         state.modelLoaded = true;
         stopModelProgress(true);
+        logger.info('模型加载成功:', config.name, '输入名:', state.inputName, '输出名:', state.outputName);
         showToast(`${config.name} 模型加载成功`, 'success');
         return true;
     } catch (error) {
-        console.error('模型加载失败:', error);
+        logError('模型加载失败', error);
         state.session = null;
         state.modelLoaded = false;
         stopModelProgress(false);
@@ -735,6 +805,128 @@ function hideProcessProgress() {
     elements.processProgressFill.classList.remove('is-busy');
 }
 
+// ---------- 本地 Demucs 服务（桌面加速模式）----------
+// 启动时探测本机是否跑着 server.py；连上就把整个分离流程交给它，
+// 浏览器不再下载/运行 300MB 的 ONNX 模型（那个在 wasm 后端必崩）。
+async function checkLocalService() {
+    for (const base of LOCAL_SERVICE_URLS) {
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 2000);
+            const res = await fetch(`${base}/api/health`, { signal: controller.signal, cache: 'no-store' });
+            clearTimeout(timer);
+            if (!res.ok) continue;
+            const data = await res.json().catch(() => ({}));
+            state.useLocalService = true;
+            state.localServiceBase = base;
+            state.localServiceModel = (data && data.model) || 'htdemucs';
+            showLocalServiceBanner(data);
+            logger.info('检测到本地 Demucs 服务:', base, data);
+            return;
+        } catch (e) {
+            // 该地址没起服务，静默跳过，试下一个
+        }
+    }
+    logger.info('未检测到本地 Demucs 服务，继续使用浏览器端推理');
+}
+
+function showLocalServiceBanner(data) {
+    const el = document.getElementById('localServiceBanner');
+    if (!el) return;
+    const device = (data && data.device === 'cuda') ? 'GPU' : 'CPU';
+    el.hidden = false;
+    el.innerHTML =
+        `✅ 已检测到本地 Demucs 服务（${device} 加速），将自动走本地模式，无需在浏览器里下载/运行模型。` +
+        `<br><span class="hint">未启动服务时网页仍可用浏览器端推理（较慢）。启动方式见 README「本地服务模式」。</span>`;
+}
+
+// 通过本地服务完成分离，返回与 separateAudio 相同形状的 results（source -> AudioBuffer）。
+// 流程：上传文件拿 job_id → 轮询任务状态 → 逐轨下载 WAV 并解码为 AudioBuffer。
+async function separateViaServer(file) {
+    const base = state.localServiceBase;
+
+    // 1) 上传文件
+    showProcessProgress('上传中', '正在上传音频到本地服务...');
+    const form = new FormData();
+    form.append('file', file);
+    let jobId;
+    try {
+        const res = await fetch(`${base}/api/separate`, { method: 'POST', body: form });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        jobId = data.job_id;
+        if (!jobId) throw new Error('服务未返回 job_id');
+    } catch (e) {
+        throw new Error(
+            '调用本地服务失败：' + e.message +
+            '。请确认 start-server（server.py）是否正在运行，或刷新页面重试。'
+        );
+    }
+
+    // 2) 轮询任务状态
+    let status = 'queued';
+    let lastMsg = '';
+    while (status !== 'done' && status !== 'error') {
+        await new Promise((r) => setTimeout(r, 1000));
+        const res = await fetch(`${base}/api/job/${jobId}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`查询任务状态失败 HTTP ${res.status}`);
+        const job = await res.json();
+        status = job.status;
+        lastMsg = job.message || '';
+        if (typeof job.progress === 'number') {
+            updateProcessProgress(job.progress, '本地分离中', lastMsg);
+        } else {
+            setProcessIndeterminate('本地分离中', lastMsg);
+        }
+        if (status === 'error') {
+            throw new Error('本地服务处理失败：' + (job.error || job.message || '未知错误'));
+        }
+    }
+
+    // 3) 逐轨下载并解码为 AudioBuffer（供 displayResults 播放/导出复用既有链路）
+    updateProcessProgress(95, '下载结果', '正在下载分离结果...');
+    const ctx = getAudioContext();
+    const stems = ['vocals', 'accompaniment', 'drums', 'bass', 'other'];
+    const results = {};
+    for (const name of stems) {
+        const url = `${base}/api/stem/${jobId}/${name}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`下载音轨 ${name} 失败 HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        results[name] = await ctx.decodeAudioData(buf);
+    }
+    return results;
+}
+
+// 把分离过程中的异常翻译成用户能看懂的提示，并刷新进度条/Toast
+function reportProcessError(error) {
+    logError('处理失败', error);
+
+    // ONNX Runtime Web 在 wasm 内部失败时有时会抛一个裸数字（状态指针），
+    // 没有 message，直接拼出来会是 "处理失败: 462360728"，这里翻译成人话
+    const raw = (error && error.message) || String(error);
+    const isOpaqueWasmError = !(error && error.message) && /^\d+$/.test(String(error));
+    const message = isOpaqueWasmError
+        ? '模型推理失败（ONNX Runtime Web 内部错误 ' + String(error) + '）。当前浏览器里这个 300MB 的模型跑不动，建议改用本地 Demucs 服务'
+        : raw;
+
+    elements.processStage.textContent = '转换失败';
+    elements.processProgressText.textContent = message;
+    elements.processBar.classList.remove('is-indeterminate');
+    elements.processProgressFill.classList.remove('is-busy');
+    elements.processProgressFill.style.background = 'var(--color-error)';
+    showToast('处理失败: ' + message, 'error');
+}
+
+// 分离结束后统一复位按钮和进度条（失败时保留错误信息几秒再收起）
+function resetProcessUI() {
+    state.isProcessing = false;
+    elements.processBtn.disabled = false;
+    elements.processBtn.querySelector('.btn-text').hidden = false;
+    elements.processBtn.querySelector('.btn-loading').hidden = true;
+    setTimeout(hideProcessProgress, 1500);
+}
+
 // 音频处理主流程
 async function processAudio() {
     if (state.isProcessing) return;
@@ -746,10 +938,35 @@ async function processAudio() {
 
     // 浏览器端单线程推理很慢，长音频提前提醒（不阻止，用户可以继续等）
     if (state.audioBuffer.duration > 120) {
-        showToast('音频超过 2 分钟，浏览器处理会比较慢，建议先用短片段试效果', 'info');
+        showToast('音频超过 2 分钟，处理会比较慢，建议先用短片段试效果', 'info');
     }
 
-    // 首次运行需要先下载模型，期间禁用按钮避免重复点击
+    // 本地加速模式：分离交给本机 Demucs 服务，浏览器不需要下载/加载模型
+    if (state.useLocalService) {
+        state.isProcessing = true;
+        elements.processBtn.disabled = true;
+        elements.processBtn.querySelector('.btn-text').hidden = true;
+        elements.processBtn.querySelector('.btn-loading').hidden = false;
+        showProcessProgress('准备转换', '已连接本地 Demucs 服务，准备上传...');
+        hideResults();
+
+        try {
+            logger.info('开始分离音频（本地服务）:', state.audioFile && state.audioFile.name);
+            const results = await separateViaServer(state.audioFile);
+            displayResults(results);
+            finishProcessProgress('已生成人声、伴奏、鼓、贝斯、其他');
+            logger.info('分离完成，已生成音轨:', Object.keys(results).join(', '));
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            showToast('分离完成！', 'success');
+        } catch (error) {
+            reportProcessError(error);
+        } finally {
+            resetProcessUI();
+        }
+        return;
+    }
+
+    // 浏览器端模式：首次运行需要先下载模型，期间禁用按钮避免重复点击
     if (!state.session) {
         state.isProcessing = true;
         elements.processBtn.disabled = true;
@@ -774,28 +991,19 @@ async function processAudio() {
 
     try {
         const config = MODEL_CONFIGS[state.selectedModel];
+        logger.info('开始分离音频:', state.audioFile && state.audioFile.name, '模型:', config.name);
         const results = await separateAudio(state.audioBuffer, config);
         displayResults(results);
         // AudioBuffer 里的数据已经编码成 WAV Blob，这里释放掉，给长音频省内存
         state.results = {};
         finishProcessProgress('已生成人声、伴奏、鼓、贝斯、其他');
+        logger.info('分离完成，已生成音轨:', Object.keys(results).join(', '));
         await new Promise((resolve) => setTimeout(resolve, 700));
         showToast('分离完成！', 'success');
     } catch (error) {
-        console.error('处理失败:', error);
-        elements.processStage.textContent = '转换失败';
-        elements.processProgressText.textContent = error.message || String(error);
-        elements.processBar.classList.remove('is-indeterminate');
-        elements.processProgressFill.classList.remove('is-busy');
-        elements.processProgressFill.style.background = 'var(--color-error)';
-        showToast('处理失败: ' + error.message, 'error');
+        reportProcessError(error);
     } finally {
-        state.isProcessing = false;
-        elements.processBtn.disabled = false;
-        elements.processBtn.querySelector('.btn-text').hidden = false;
-        elements.processBtn.querySelector('.btn-loading').hidden = true;
-        // 失败时保留错误信息，几秒后再收起进度条
-        setTimeout(hideProcessProgress, 1500);
+        resetProcessUI();
     }
 }
 
@@ -810,9 +1018,12 @@ async function separateAudio(audioBuffer, config) {
         throw new Error('音频超过 10 分钟，浏览器内存不足以处理，请先裁剪');
     }
 
+    logger.info('分离参数:', config.name, '采样率', sampleRate, '片段', segmentLength, '重叠', overlap);
+
     // 重采样到模型要求的采样率 (如果需要)
     let inputBuffer = audioBuffer;
     if (Math.abs(audioBuffer.sampleRate - sampleRate) > 1) {
+        logger.info('音频采样率不匹配，重采样中:', audioBuffer.sampleRate, '→', sampleRate);
         inputBuffer = await resampleAudio(audioBuffer, sampleRate);
     }
 
@@ -825,6 +1036,7 @@ async function separateAudio(audioBuffer, config) {
     const numSegments = totalLength <= segmentLength
         ? 1
         : Math.ceil((totalLength - segmentLength) / hopSize) + 1;
+    logger.info('待处理音频:', `${formatTime(inputBuffer.duration)}`, `${totalLength} 采样点`, `${numChannels} 声道`, '总段数', numSegments);
 
     // 输出缓冲区（声道优先布局：ch * length + i）
     const outputBuffers = {};
@@ -877,11 +1089,13 @@ async function separateAudio(audioBuffer, config) {
             const stemTensor = outputs[state.outputName];
 
             if (!stemTensor || !stemTensor.data) {
+                logError('模型输出与预期不符', new Error('实际输出: ' + (Object.keys(outputs).join(', ') || '无')));
                 throw new Error('模型输出与预期不符，实际输出: ' + (Object.keys(outputs).join(', ') || '无'));
             }
 
             const dims = stemTensor.dims || [];
             if (dims.length !== 4 || dims[1] !== stemCount || dims[2] !== numChannels || dims[3] !== segmentLength) {
+                logError('模型输出形状异常', new Error(`[${dims.join(', ')}]，期望 [1, ${stemCount}, ${numChannels}, ${segmentLength}]`));
                 throw new Error(
                     `模型输出形状异常: [${dims.join(', ')}]，期望 [1, ${stemCount}, ${numChannels}, ${segmentLength}]`
                 );
@@ -968,6 +1182,7 @@ async function separateAudio(audioBuffer, config) {
         resultBuffers[source] = buffer;
     });
 
+    logger.info('分离算法完成，生成音轨:', Object.keys(resultBuffers).join(', '));
     return resultBuffers;
 }
 
@@ -1102,8 +1317,13 @@ async function init() {
     // 不再在页面打开时自动下载 100MB+ 的模型：
     // 既拖慢首屏，也会让用户以为“页面卡住了”。模型改为点击“开始分离”时懒加载。
 
+    // 探测本机是否跑着 Demucs 服务（server.py），连上就自动切本地加速模式。
+    // 不阻塞页面交互，结果出来前页面照常可用（浏览器模式兜底）。
+    checkLocalService();
+
     // 通知 index.html 里的兜底脚本：应用已正常启动
     window.__appReady = true;
+    logger.info('应用初始化完成，已绑定事件监听');
     if (typeof window.clearBootError === 'function') {
         window.clearBootError();
     }

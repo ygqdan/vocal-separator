@@ -2,6 +2,18 @@
 node_modules/
 vendor/
 
+# Python 虚拟环境（start-server 自动创建）
+.venv/
+
+# Python 缓存 / 构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+
 # 构建输出
 dist/
 build/
@@ -12,6 +24,8 @@ build/
 .env
 .env.local
 .env.*.local
+.enev/
+.enev
 
 # IDE/编辑器
 .vscode/
@@ -29,6 +43,7 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+server.err
 
 # 测试覆盖率
 coverage/
@@ -40,6 +55,19 @@ coverage/
 
 # 本地模型文件（体积 100MB+，不要提交；用 download-model.bat 下载）
 models/
+
+# 本地临时/测试产物（本机调试产生的音频与脚本，勿提交）
+test_*.py
+test_*.wav
+vocals.wav
+accompaniment.wav
+drums.wav
+bass.wav
+other.wav
+
+# pip 安装产生的临时目录（含被中断的安装残留）
+pip-*/
+vocalsep_*/
 
 # OS特定
 *.DS_Store
