@@ -23,14 +23,27 @@ const ORT_CDN_BASES = [
     `https://registry.npmmirror.com/onnxruntime-web/${ORT_VERSION}/files/dist/`
 ];
 
-// 本地 Demucs 服务（桌面加速模式）：页面启动后依次探测这些地址，
-// 只要有一个返回 /api/health，就切到「本地模式」——把耗时的分离交给本机 Python 跑，
+// 本地 Demucs 服务（桌面加速模式）：页面启动、以及每次点击「开始分离」时都会探测，
+// 只要有地址返回有效的 /api/health，就切到「本地模式」——把耗时的分离交给本机 Python 跑，
 // 浏览器只负责上传、轮询进度、下载并播放/保存结果。这样就绕开了
 // wasm 后端跑不动 300MB 模型那个浏览器硬限制。
+// 优先探测页面自己的源：server.py 也会托管前端，用任意端口启动都能直接识别；
+// 再探测默认的 8001 端口，兼容 8000 静态页面 + 8001 API 的部署方式。
 const LOCAL_SERVICE_URLS = [
     'http://127.0.0.1:8001',
     'http://localhost:8001'
 ];
+
+function getLocalServiceCandidates() {
+    const candidates = [];
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+        candidates.push(location.origin);
+    }
+    LOCAL_SERVICE_URLS.forEach((base) => {
+        if (!candidates.includes(base)) candidates.push(base);
+    });
+    return candidates;
+}
 
 let ortPromise = null;
 // 加载成功后的 ONNX Runtime 命名空间（供 separateAudio 里 new ort.Tensor 使用）
@@ -312,19 +325,24 @@ function showToast(message, type = 'info') {
         position: fixed;
         bottom: 20px;
         right: 20px;
+        max-width: min(560px, calc(100vw - 40px));
         padding: 12px 20px;
         border-radius: 8px;
         color: white;
         font-weight: 500;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
         z-index: 1000;
         animation: slideIn 0.3s ease;
         background: ${type === 'error' ? '#dc2626' : type === 'success' ? '#059669' : '#2563eb'};
     `;
     document.body.appendChild(toast);
+    // 错误提示通常包含排查步骤，留足阅读时间，别让长文本一闪而过
     setTimeout(() => {
         toast.style.animation = 'slideOut 0.3s ease';
         setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    }, type === 'error' ? 8000 : 3000);
 }
 
 // 添加 toast 动画样式
@@ -816,40 +834,68 @@ function hideProcessProgress() {
 }
 
 // ---------- 本地 Demucs 服务（桌面加速模式）----------
-// 启动时探测本机是否跑着 server.py；连上就把整个分离流程交给它，
-// 浏览器不再下载/运行 300MB 的 ONNX 模型（那个在 wasm 后端必崩）。
-async function checkLocalService() {
-    for (const base of LOCAL_SERVICE_URLS) {
+// 页面启动和每次点击「开始分离」都会探测本机是否跑着 server.py；
+// 连上就把整个分离流程交给它，浏览器不再下载/运行 300MB 的 ONNX 模型。
+// 只有 /api/health 明确返回 status=ok 才算命中，避免把静态服务器的 404 页面误判成服务。
+async function checkLocalService({ quiet = false } = {}) {
+    for (const base of getLocalServiceCandidates()) {
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 2000);
-            const res = await fetch(`${base}/api/health`, { signal: controller.signal, cache: 'no-store' });
-            clearTimeout(timer);
+            let res;
+            try {
+                res = await fetch(`${base}/api/health`, { signal: controller.signal, cache: 'no-store' });
+            } finally {
+                clearTimeout(timer);
+            }
             if (!res.ok) continue;
-            const data = await res.json().catch(() => ({}));
+            const data = await res.json().catch(() => null);
+            if (!data || data.status !== 'ok') continue;
+
             state.useLocalService = true;
             state.localServiceBase = base;
-            state.localServiceModel = (data && data.model) || 'htdemucs';
+            state.localServiceModel = data.model || 'htdemucs';
             showLocalServiceBanner(data);
             // 只有本地模式才具备 Whisper 字幕能力，检测到服务后再显示勾选项
             if (elements.subtitleOptionRow) elements.subtitleOptionRow.hidden = false;
-            logger.info('检测到本地 Demucs 服务:', base, data);
-            return;
+            if (!quiet) logger.info('检测到本地 Demucs 服务:', base, data);
+            return true;
         } catch (e) {
             // 该地址没起服务，静默跳过，试下一个
         }
     }
-    logger.info('未检测到本地 Demucs 服务，继续使用浏览器端推理');
+
+    // 服务也可能中途被关掉，别继续沿用上次的本地地址
+    state.useLocalService = false;
+    state.localServiceBase = '';
+    state.localServiceModel = '';
+    if (elements.subtitleOptionRow) elements.subtitleOptionRow.hidden = true;
+    showLocalServiceMissingBanner();
+    if (!quiet) logger.info('未检测到本地 Demucs 服务，继续使用浏览器端推理');
+    return false;
 }
 
 function showLocalServiceBanner(data) {
     const el = document.getElementById('localServiceBanner');
     if (!el) return;
     const device = (data && data.device === 'cuda') ? 'GPU' : 'CPU';
+    el.classList.remove('is-warning');
     el.hidden = false;
     el.innerHTML =
         `✅ 已检测到本地 Demucs 服务（${device} 加速），将自动走本地模式，无需在浏览器里下载/运行模型。` +
-        `<br><span class="hint">未启动服务时网页仍可用浏览器端推理（较慢）。启动方式见 README「本地服务模式」。</span>`;
+        `<br><span class="hint">浏览器端推理受 wasm 限制，建议保持本服务运行。启动方式见 README「本地服务模式」。</span>`;
+}
+
+function showLocalServiceMissingBanner() {
+    const el = document.getElementById('localServiceBanner');
+    if (!el) return;
+    el.classList.add('is-warning');
+    el.hidden = false;
+    el.innerHTML =
+        '⚠️ 未检测到本地 Demucs 服务：浏览器 wasm 无法稳定运行 300MB 的 HTDemucs 模型。' +
+        '<br>请运行项目里的 <b>start-server.bat</b>（macOS/Linux 用 <b>start-server.sh</b>）启动本地服务，' +
+        '回来后再点「开始分离」即可自动切换，也可以直接打开本地服务提供的页面。' +
+        '<br><span class="hint">服务在页面打开之后才启动也没关系，点击按钮时会重新探测，无需刷新。</span>';
 }
 
 // 通过本地服务完成分离，返回与 separateAudio 相同形状的 results（source -> AudioBuffer）。
@@ -894,7 +940,10 @@ async function separateViaServer(file) {
             setProcessIndeterminate('本地分离中', lastMsg);
         }
         if (status === 'error') {
-            throw new Error('本地服务处理失败：' + (job.error || job.message || '未知错误'));
+            // job.error 是完整 Python 堆栈，直接弹出来会糊满整屏；
+            // job.message 是服务整理过的简短原因，优先展示。
+            const detail = job.message || job.error || '未知错误';
+            throw new Error('本地服务处理失败：' + detail);
         }
     }
 
@@ -952,7 +1001,9 @@ function reportProcessError(error) {
     const raw = (error && error.message) || String(error);
     const isOpaqueWasmError = !(error && error.message) && /^\d+$/.test(String(error));
     const message = isOpaqueWasmError
-        ? '模型推理失败（ONNX Runtime Web 内部错误 ' + String(error) + '）。当前浏览器里这个 300MB 的模型跑不动，建议改用本地 Demucs 服务'
+        ? '模型推理失败（ONNX Runtime Web 内部错误 ' + String(error) + '）。浏览器 wasm 跑不动这个 300MB 模型。' +
+          '请运行项目里的 start-server.bat（macOS/Linux 用 start-server.sh）启动本地 Demucs 服务，' +
+          '再点一次「开始分离」即可自动切到本地模式；也可以直接打开本地服务提供的页面。'
         : raw;
 
     elements.processStage.textContent = '转换失败';
@@ -981,9 +1032,15 @@ async function processAudio() {
         return;
     }
 
-    // 浏览器端单线程推理很慢，长音频提前提醒（不阻止，用户可以继续等）
-    if (state.audioBuffer.duration > 120) {
-        showToast('音频超过 2 分钟，处理会比较慢，建议先用短片段试效果', 'info');
+    // 页面打开时可能还没启动本地服务；每次点击都重新探测一次，
+    // 这样后启动服务也无需刷新页面（同源服务用任意端口都能识别）。
+    if (!state.useLocalService) {
+        elements.processBtn.disabled = true;
+        try {
+            await checkLocalService({ quiet: true });
+        } finally {
+            elements.processBtn.disabled = false;
+        }
     }
 
     // 本地加速模式：分离交给本机 Demucs 服务，浏览器不需要下载/加载模型
@@ -1012,6 +1069,11 @@ async function processAudio() {
             resetProcessUI();
         }
         return;
+    }
+
+    // 只有真正走浏览器端推理时才提示速度问题（本地模式不受 wasm 限制）
+    if (state.audioBuffer.duration > 120) {
+        showToast('音频超过 2 分钟，浏览器端处理会比较慢，建议启动本地 Demucs 服务', 'info');
     }
 
     // 浏览器端模式：首次运行需要先下载模型，期间禁用按钮避免重复点击

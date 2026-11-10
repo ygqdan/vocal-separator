@@ -693,6 +693,12 @@ footer p:first-child {
     color: inherit;
     text-decoration: underline;
 }
+/* 没检测到本地服务时，同一横幅改成醒目的黄色警示 */
+.local-service-banner.is-warning {
+    background: var(--color-warning-light, #fef3c7);
+    border-color: var(--color-warning, #d97706);
+    color: var(--color-text, #1e293b);
+}
 
 /* 响应式 */
 @media (max-width: 600px) {

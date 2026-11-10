@@ -85,6 +85,10 @@ echo.
 echo   访问地址: http://localhost:%PORT%
 echo   停止服务: 按 Ctrl+C
 echo.
+echo   提示: 这是纯静态页面；未运行本地 Demucs 服务时，浏览器无法稳定
+echo         推理 300MB 的 HTDemucs 模型。推荐另开窗口运行 start-server.bat
+echo         启动本地服务（端口 8001），然后刷新本页面即可自动切换。
+echo.
 
 REM 设置 NO_OPEN=1 可禁止自动打开浏览器
 if "%NO_OPEN%"=="1" set "OPEN_BROWSER=0"

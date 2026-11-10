@@ -11,6 +11,8 @@ demucs>=4.0
 # Optional: Whisper ASR for generating timed subtitle (SRT) from vocals
 faster-whisper>=1.0
 soundfile>=0.12
+# PyAV 自带 FFmpeg，用于解码 MP3 / M4A / AAC（无需系统安装 ffmpeg）
+av>=10
 # Note: demucs pulls in torch / torchaudio automatically.
 # For GPU acceleration, install a CUDA build of torch matching your GPU
 # from https://pytorch.org (do NOT rely on the default CPU wheel).

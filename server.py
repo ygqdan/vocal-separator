@@ -25,6 +25,8 @@ session.run() 必崩」这个浏览器硬限制：真正的推理放到本机 Py
 
 import argparse
 import os
+import sys
+import webbrowser
 
 # Hugging Face 相关默认值（可在启动前用环境变量覆盖）：
 # 1) 国内访问 huggingface.co 不稳，默认走镜像；
@@ -33,9 +35,57 @@ import os
 # 这两项必须在 huggingface_hub 被 import 之前设置（faster-whisper 是懒加载，满足）。
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-# 3) 把 HF 缓存放到项目内 .cache/hf，避免某些环境 ~/.cache 无法写入。
-_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-os.environ.setdefault("HF_HOME", os.path.join(_PROJECT_DIR, ".cache", "hf"))
+
+
+def _app_base():
+    """资源根目录：开发时用脚本所在目录；PyInstaller 冻结后用解包目录。"""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _user_data_dir():
+    """可写用户数据目录（模型缓存等），避免安装目录只读。"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "vocal-separator")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+_APP_BASE = _app_base()
+
+# 缓存目录：冻结版用用户目录（可写），开发版用项目内 .cache。
+# TORCH_HOME/HF_HOME 必须在 torch / huggingface_hub 被 import 之前确定。
+if getattr(sys, "frozen", False):
+    _CACHE_ROOT = os.path.join(_user_data_dir(), "cache")
+else:
+    _CACHE_ROOT = os.path.join(_APP_BASE, ".cache")
+# torch.hub 固定把权重放在 $TORCH_HOME/hub/checkpoints，而项目缓存和打包进来的
+# .cache 都是这个布局；多套一层 torch/ 会找不到内置权重、误以为需要重新下载 300MB。
+os.environ.setdefault("TORCH_HOME", _CACHE_ROOT)
+os.environ.setdefault("HF_HOME", os.path.join(_CACHE_ROOT, "hf"))
+
+
+def prepare_cache():
+    """冻结版：若内置模型包存在，首次启动把它从只读解包目录复制到可写用户缓存。"""
+    if not getattr(sys, "frozen", False):
+        return
+    bundled = os.path.join(_APP_BASE, ".cache")
+    if not os.path.isdir(bundled):
+        return  # 未打包模型，首次运行会自行下载
+    torch_cached = os.path.isdir(os.path.join(_CACHE_ROOT, "hub", "checkpoints"))
+    hf_cached = os.path.isdir(os.path.join(_CACHE_ROOT, "hf", "hub"))
+    if torch_cached and hf_cached:
+        return  # 已解包过
+    import shutil
+
+    print("[vocal-separator] 首次启动：正在解包内置模型（约 700MB，请稍候）...")
+    try:
+        # 允许目标目录已经存在（例如只有一部分缓存），补齐缺失文件即可
+        shutil.copytree(bundled, _CACHE_ROOT, dirs_exist_ok=True)
+        print("[vocal-separator] 内置模型解包完成。")
+    except Exception as e:  # noqa: BLE001
+        print(f"[警告] 内置模型解包失败，将改为在线下载：{e}")
 
 import tempfile
 import threading
@@ -203,8 +253,8 @@ def cleanup_old_jobs():
 def load_audio(input_path):
     """用 soundfile 读取音频，返回 (wav, sr)，wav 形状 [channels, samples] float32。
 
-    soundfile（libsndfile）原生支持 WAV / FLAC / OGG 等；对 MP3 / M4A 等格式，
-    若系统装了 ffmpeg，会由 load_audio_ffmpeg 兜底。
+    soundfile（libsndfile）对 WAV / FLAC / OGG 最稳；部分 MP3 能读出元数据，
+    却在 sf.read() 抛 LibsndfileError: Unspecified internal error，此时由 PyAV 兜底。
     """
     import soundfile as sf
     import torch
@@ -214,18 +264,65 @@ def load_audio(input_path):
     return wav, int(sr)
 
 
+def load_audio_av(input_path, samplerate, channels):
+    """用 PyAV（自带 FFmpeg）解码 MP3 / M4A / AAC，并直接重采样为指定声道/采样率。
+
+    PyAV 由 faster-whisper 带进依赖，自带 FFmpeg 动态库，因此不需要系统安装
+    ffmpeg，也不需要再下载任何模型。Windows 上这是 MP3 的主要解码路径。
+    """
+    import av
+    import numpy as np
+    import torch
+
+    layout = "stereo" if channels == 2 else "mono"
+    container = av.open(input_path)
+    stream = container.streams.audio[0]
+    resampler = av.AudioResampler(format="fltp", layout=layout, rate=samplerate)
+    chunks = []
+    try:
+        for frame in container.decode(stream):
+            for out in resampler.resample(frame) or []:
+                chunks.append(out.to_ndarray())
+        for out in resampler.resample(None) or []:
+            chunks.append(out.to_ndarray())
+    finally:
+        container.close()
+
+    if not chunks:
+        raise RuntimeError("PyAV 未解码出任何音频帧")
+    # fltp 是 planar float32，to_ndarray() 形状为 [channels, samples]
+    data = np.concatenate(chunks, axis=1)
+    wav = torch.from_numpy(np.ascontiguousarray(data)).float()
+    return wav, samplerate
+
+
 def load_audio_ffmpeg(input_path, samplerate, channels):
-    """用系统 ffmpeg 把音频解码成指定采样率/声道的 float32 PCM。无 ffmpeg 时抛 FileNotFoundError。"""
+    """最后兜底：用 ffmpeg 解码成 float32 PCM。优先内置 imageio-ffmpeg，其次系统 ffmpeg。"""
+    import shutil
     import subprocess
     import numpy as np
     import torch
 
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        try:
+            import imageio_ffmpeg
+
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:  # noqa: BLE001
+            exe = None
+    if not exe:
+        raise RuntimeError("找不到 ffmpeg 可执行文件，且未安装 imageio-ffmpeg")
+
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        exe, "-hide_banner", "-loglevel", "error",
         "-i", input_path,
         "-f", "f32le", "-ac", str(channels), "-ar", str(samplerate), "-",
     ]
-    raw = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+    try:
+        raw = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg 无法启动：" + str(exc)) from exc
     arr = np.frombuffer(raw, dtype=np.float32)
     frames = len(arr) // channels
     wav = torch.from_numpy(arr.reshape(channels, frames)).float()
@@ -257,12 +354,32 @@ def process_job(job_id, input_path, with_subtitles=False):
         import torch
         from demucs.audio import convert_audio
 
-        # 先试 soundfile，失败（如 MP3/M4A）再试 ffmpeg（系统需已安装）
+        # 解码优先级：soundfile -> PyAV（自带 FFmpeg，免系统安装）-> 系统/内置 ffmpeg。
+        # MP3 常见情况是 libsndfile 能读元数据，却在 sf.read() 抛
+        # "Unspecified internal error"；PyAV 可以完整解出这类文件。
+        decode_errors = []
+        wav = None
+        sr = None
         try:
             wav, sr = load_audio(input_path)
-        except Exception:
-            wav, sr = load_audio_ffmpeg(
-                input_path, model.samplerate, model.audio_channels
+        except Exception as exc:  # noqa: BLE001
+            decode_errors.append("soundfile: " + str(exc))
+            try:
+                wav, sr = load_audio_av(
+                    input_path, model.samplerate, model.audio_channels
+                )
+            except Exception as av_exc:  # noqa: BLE001
+                decode_errors.append("PyAV: " + str(av_exc))
+                try:
+                    wav, sr = load_audio_ffmpeg(
+                        input_path, model.samplerate, model.audio_channels
+                    )
+                except Exception as ff_exc:  # noqa: BLE001
+                    decode_errors.append("ffmpeg: " + str(ff_exc))
+        if wav is None:
+            raise RuntimeError(
+                "无法解码该音频文件，请把文件转成 WAV 或 FLAC 后重试。原因："
+                + "；".join(decode_errors)[:400]
             )
         wav = convert_audio(wav, sr, model.samplerate, model.audio_channels)
 
@@ -440,6 +557,30 @@ def stem_file(job_id, name):
     return send_file(path, mimetype="audio/wav", as_attachment=False, download_name=f"{name}.wav")
 
 
+# ------------------------------ 前端静态页面（打包后单端口同时托管页面与 API）------------------------------
+
+_FRONTEND_FILES = {
+    "index.html": "text/html; charset=utf-8",
+    "app.js": "application/javascript; charset=utf-8",
+    "styles.css": "text/css; charset=utf-8",
+}
+
+
+@app.route("/")
+def index_page():
+    return send_file(os.path.join(_APP_BASE, "index.html"), mimetype="text/html; charset=utf-8")
+
+
+@app.route("/<path:filename>")
+def frontend_static(filename):
+    # 只放行白名单文件，避免误暴露源码/配置
+    if filename not in _FRONTEND_FILES:
+        return jsonify(error="未找到该资源"), 404
+    return send_file(
+        os.path.join(_APP_BASE, filename), mimetype=_FRONTEND_FILES[filename]
+    )
+
+
 def main():
     global MODEL_NAME, DEVICE, ASR_MODEL_NAME, ASR_LANGUAGE
     parser = argparse.ArgumentParser(description="本地 Demucs 服务（供网页调用）")
@@ -461,7 +602,15 @@ def main():
         default=None,
         help="强制识别语言（如 zh）；不填则自动检测",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="不自动打开浏览器（适合无界面/服务器环境）",
+    )
     args = parser.parse_args()
+
+    # 冻结版：必要时把内置模型解包到可写用户缓存（必须在加载模型之前）
+    prepare_cache()
 
     # 尽早检查 torch：导入失败时给出真实原因，
     # 而不是让 demucs 内部二次 import 时抛出误导性的
@@ -490,6 +639,15 @@ def main():
     print(f"[vocal-separator] 模型={MODEL_NAME}  设备={DEVICE}")
     print(f"[vocal-separator] 旁白字幕 Whisper={ASR_MODEL_NAME}  语言={ASR_LANGUAGE or 'auto'}")
     print("[vocal-separator] 在网页里点击「开始分离」即可自动调用本服务。")
+
+    # 浏览器模式自动打开页面（同源托管，无需再开静态服务器）
+    if not args.no_browser:
+        url = f"http://{args.host}:{args.port}/"
+        threading.Thread(
+            target=lambda: (time.sleep(1.5), webbrowser.open(url)),
+            daemon=True,
+        ).start()
+
     app.run(host=args.host, port=args.port, threaded=True)
 
 

@@ -1,66 +1,77 @@
 @echo off
-chcp 65001 >nul
-REM 启动本地 Demucs 服务（桌面加速模式）
-REM 网页会自动探测 http://127.0.0.1:8001，连上就切到本地模式。
+REM console code page stays default; this batch is ASCII-only.
+REM Local Demucs service launcher - desktop acceleration mode.
+REM The web page probes http://127.0.0.1:8001 and switches to local mode automatically.
 REM
-REM 注意：torch 在过新的 Python（如 3.14）上可能装不上/导入失败，
-REM 所以这里优先找 3.11~3.13 的 Python，并在项目内建 .venv 虚拟环境。
+REM NOTE: torch does not support Python 3.14+ yet, so prefer 3.11/3.12/3.13
+REM and create a project-local .venv virtual environment.
+REM This file MUST stay ASCII-only with CRLF line endings: cmd.exe misparses
+REM UTF-8 batch files containing Chinese after "chcp 65001" - commands get split.
 
-cd /d %~dp0
+setlocal
+cd /d "%~dp0"
 
-REM ---- 1) 找一个 torch 支持的 Python（3.11 / 3.12 / 3.13）----
+REM ---- 1) Find a Python version supported by torch - 3.11 / 3.12 / 3.13 ----
 set "PYEXE="
-py -3.12 --version >nul 2>&1 && set "PYEXE=py -3.12"
-if not defined PYEXE py -3.11 --version >nul 2>&1 && set "PYEXE=py -3.11"
-if not defined PYEXE py -3.13 --version >nul 2>&1 && set "PYEXE=py -3.13"
+py -3.12 --version >nul 2>&1
+if not errorlevel 1 set "PYEXE=py -3.12"
 if not defined PYEXE (
-    echo [错误] 未找到 Python 3.11 / 3.12 / 3.13。
-    echo 当前 torch 尚不支持 Python 3.14，请先安装其中一个版本（推荐 3.12）。
+    py -3.11 --version >nul 2>&1
+    if not errorlevel 1 set "PYEXE=py -3.11"
+)
+if not defined PYEXE (
+    py -3.13 --version >nul 2>&1
+    if not errorlevel 1 set "PYEXE=py -3.13"
+)
+if not defined PYEXE (
+    echo [ERROR] Python 3.11 / 3.12 / 3.13 not found.
+    echo torch does not support Python 3.14 yet. Please install 3.12 - recommended.
     pause
     exit /b 1
 )
-echo 使用 Python: %PYEXE%
+echo Using Python: %PYEXE%
 
-REM ---- 2) 准备项目内虚拟环境 .venv ----
-if not exist .venv\Scripts\python.exe (
-    echo 正在创建虚拟环境 .venv（仅首次）...
+REM ---- 2) Prepare project-local virtual environment .venv ----
+if not exist ".venv\Scripts\python.exe" (
+    echo Creating virtual environment .venv - first run only...
     %PYEXE% -m venv .venv
     if errorlevel 1 (
-        echo [错误] 创建虚拟环境失败。
+        echo [ERROR] Failed to create virtual environment.
         pause
         exit /b 1
     )
 )
 set "VPY=.venv\Scripts\python.exe"
 
-echo [1/2] 检查依赖（首次会自动 pip 安装，torch 较大，可能耗时几分钟）...
-"%VPY%" -c "import flask, flask_cors, demucs, torch" >nul 2>&1
+echo [1/2] Checking dependencies - first run installs torch, may take minutes...
+"%VPY%" -c "import flask, flask_cors, demucs, torch, av" >nul 2>&1
 if errorlevel 1 (
-    echo 正在安装依赖：flask flask-cors demucs ...
+    echo Installing dependencies: flask flask-cors demucs ...
     "%VPY%" -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [错误] 依赖安装失败，请检查网络或手动执行：
+        echo [ERROR] Dependency installation failed. Run manually:
         echo     "%VPY%" -m pip install -r requirements.txt
         pause
         exit /b 1
     )
 )
 
-echo [2/2] 启动本地 Demucs 服务（默认 http://127.0.0.1:8001）...
-echo 保持此窗口打开；关闭窗口即停止服务。
+echo [2/2] Starting local Demucs service at http://127.0.0.1:8001 ...
+echo Keep this window open; closing it stops the service.
 
-REM Demucs / Whisper 模型要从 Hugging Face 下载，国内用镜像更稳（与网页端一致）
+REM Demucs / Whisper weights come from Hugging Face; use the CN mirror.
 if not defined HF_ENDPOINT set "HF_ENDPOINT=https://hf-mirror.com"
-REM hf-mirror 不支持 Xet 协议，禁用 Xet 回退普通下载（否则字幕模型会 401）
+REM hf-mirror does not support Xet; disable it or subtitle models return 401.
 if not defined HF_HUB_DISABLE_XET set "HF_HUB_DISABLE_XET=1"
-REM HF 缓存放到项目内，避免 ~/.cache 权限问题
+REM Keep HF cache inside the project to avoid ~/.cache permission issues.
 if not defined HF_HOME set "HF_HOME=%~dp0.cache\hf"
 
-REM torch.hub / demucs 默认缓存到 ~/.cache/torch，某些环境会“拒绝访问”，
-REM 改到项目内 .cache，自包含且保证可写。
+REM torch.hub / demucs default cache can be unwritable in ~/.cache on some systems;
+REM keep it inside the project as well (must match server.py TORCH_HOME layout).
 if not defined TORCH_HOME set "TORCH_HOME=%~dp0.cache"
 if not exist "%TORCH_HOME%" mkdir "%TORCH_HOME%" >nul 2>&1
 if not exist "%HF_HOME%" mkdir "%HF_HOME%" >nul 2>&1
 
 "%VPY%" server.py %*
 pause
+endlocal
